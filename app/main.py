@@ -120,15 +120,17 @@ def show_sidebar():
                 "选择功能",
                 label_list,
                 index=default_index,
-                label_visibility="collapsed"
+                label_visibility="collapsed",
+                key="nav_radio"  # 添加固定的key
             )
 
-            # 根据选择的标签确定页面
-            for page_code, page_label in page_labels.items():
-                if page_label == selected_label and page_label != st.session_state.get('page_selected'):
-                    st.session_state.current_page = page_code
-                    st.session_state.page_selected = page_label
-                    break
+            # 根据选择的标签确定页面（立即更新，无需等待第二次点击）
+            if selected_label != st.session_state.get('page_selected'):
+                for page_code, page_label in page_labels.items():
+                    if page_label == selected_label:
+                        st.session_state.current_page = page_code
+                        st.session_state.page_selected = page_label
+                        break
 
             st.divider()
 
@@ -311,7 +313,21 @@ def show_project_management():
 
 def show_scoring():
     """显示评分录入页面"""
-    st.title("📝 评分录入")
+    # 标题和文件链接
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        st.title("📝 评分录入")
+    with col2:
+        # 参考文件链接
+        st.markdown("""
+        <div style="text-align: right; padding-top: 1rem;">
+            <a href="https://zfxxgk.ndrc.gov.cn/web/iteminfo.jsp?id=20590" target="_blank" style="text-decoration: none;">
+                📄 查看管理办法
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
 
     # 获取待评分项目
     projects = project_service.get_projects_for_scoring()

@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS project_total_scores (
     layout_score DECIMAL(5,2) NOT NULL COMMENT '优化生产力布局得分',
     execution_score DECIMAL(5,2) NOT NULL COMMENT '政策执行能力得分',
     rank_in_period INT,
-    grade VARCHAR(10) COMMENT '评级：excellent/good/qualified/unqualified',
+    grade VARCHAR(50) COMMENT '评级：excellent/good/qualified/unqualified',
     reviewed_by INT,
     review_comment TEXT,
     reviewed_at TIMESTAMP NULL,
