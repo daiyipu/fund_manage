@@ -384,13 +384,53 @@ def show_scoring():
     # 获取当前评分
     current_scores = scoring_service.get_project_scoring_detail(project_id)
 
-    # 为每个指标创建评分选项
+    # 为每个指标创建评分选项（包括子指标）
     scoring_options = {}
 
     for dim_code, dimension in SCORING_DIMENSIONS.items():
         for indicator in dimension['indicators']:
+            # 处理父指标（包含子指标）- 为子指标生成选项
+            if indicator.get('type') == 'parent':
+                sub_indicators = indicator.get('sub_indicators', [])
+                for sub in sub_indicators:
+                    options = []
+                    if 'scoring_guide' in sub and sub['scoring_guide']:
+                        # 将评分指南转换为选项
+                        for score_range, description in sub['scoring_guide'].items():
+                            # 解析分数范围
+                            if '-' in score_range:
+                                min_score, max_score = score_range.split('-')
+                                options.append({
+                                    'label': f"{description} ({min_score}-{max_score}分)",
+                                    'score': float(max_score),  # 使用最高分
+                                    'description': description
+                                })
+                            else:
+                                # 单个分数
+                                options.append({
+                                    'label': f"{description} ({score_range}分)",
+                                    'score': float(score_range),
+                                    'description': description
+                                })
+                    else:
+                        # 如果没有评分指南，提供0到最高分的整数选项
+                        max_score = int(sub['max_score'])
+                        for i in range(max_score + 1):
+                            options.append({
+                                'label': f"{i}分",
+                                'score': float(i),
+                                'description': f"{i}分"
+                            })
+
+                    # 按分数降序排列
+                    options.sort(key=lambda x: x['score'], reverse=True)
+                    scoring_options[sub['code']] = options
+                # 父指标本身不创建评分选项，继续下一个
+                continue
+
+            # 处理叶子指标（实际评分）
             options = []
-            if 'scoring_guide' in indicator:
+            if 'scoring_guide' in indicator and indicator['scoring_guide']:
                 # 将评分指南转换为选项
                 for score_range, description in indicator['scoring_guide'].items():
                     # 解析分数范围
@@ -426,49 +466,119 @@ def show_scoring():
     with st.form("scoring_form"):
         user = st.session_state.user
 
-        for dim_code, dimension in structure.items():
+        for dim_code, dimension in SCORING_DIMENSIONS.items():
             st.markdown(f"### {dimension['name']}（权重 {dimension['weight']}%，满分 {dimension['max_score']} 分）")
 
             # 指标评分
-            for idx, indicator in enumerate(dimension['indicators']):
-                options = scoring_options.get(indicator['code'], [])
+            for indicator in dimension['indicators']:
+                # 处理父指标（包含子指标）
+                if indicator.get('type') == 'parent':
+                    # 显示父指标标题栏
+                    st.markdown(f"#### 📊 {indicator['name']}")
 
-                # 获取当前选择的索引
-                current_score = 0
-                if current_scores.get('success') and current_scores['data']['dimensions']:
-                    for dim_data in current_scores['data']['dimensions'].values():
-                        for ind in dim_data['indicators']:
-                            if ind['code'] == indicator['code']:
-                                current_score = ind['score']
+                    # 计算子指标汇总得分
+                    sub_indicators = indicator.get('sub_indicators', [])
+                    total_sub_score = 0.0
+                    for sub in sub_indicators:
+                        score_key = f"score_value_{project_id}_{sub['code']}"
+                        if score_key in st.session_state:
+                            total_sub_score += st.session_state[score_key]
+
+                    # 显示父指标汇总信息
+                    col1, col2, col3 = st.columns([3, 2, 2])
+                    with col1:
+                        st.caption(f"满分: {indicator['max_score']} 分")
+                    with col2:
+                        st.metric("汇总得分", f"{total_sub_score:.1f}")
+                    with col3:
+                        completion = len([s for s in sub_indicators if f"score_value_{project_id}_{s['code']}" in st.session_state])
+                        st.caption(f"完成度: {completion}/{len(sub_indicators)}")
+
+                    st.markdown("---")
+
+                    # 显示子指标
+                    for sub in sub_indicators:
+                        options = scoring_options.get(sub['code'], [])
+
+                        # 获取当前选择的索引
+                        current_score = 0
+                        if current_scores.get('success') and current_scores['data']['dimensions']:
+                            for dim_data in current_scores['data']['dimensions'].values():
+                                for ind in dim_data['indicators']:
+                                    if ind['code'] == sub['code']:
+                                        current_score = ind['score']
+                                        break
+
+                        # 找到当前分数对应的索引
+                        default_index = 0
+                        for i, opt in enumerate(options):
+                            if opt['score'] == current_score:
+                                default_index = i
                                 break
 
-                # 找到当前分数对应的索引
-                default_index = 0
-                for i, opt in enumerate(options):
-                    if opt['score'] == current_score:
-                        default_index = i
-                        break
+                        # 子指标使用缩进显示
+                        with st.expander(f"└─ **{sub['name']}**（满分 {sub['max_score']} 分）", expanded=False):
+                            if options:
+                                st.write("**请选择评分等级：**")
 
-                # 使用expander让每个指标更清晰
-                with st.expander(f"**{indicator['name']}**（满分 {indicator['max_score']} 分）", expanded=False):
-                    if options:
-                        st.write("**请选择评分等级：**")
+                                # 使用selectbox让用户选择评分等级
+                                selected_option = st.selectbox(
+                                    f"选择评分_{sub['code']}",
+                                    options=options,
+                                    format_func=lambda x: x['label'],
+                                    index=default_index,
+                                    key=f"score_{project_id}_{sub['code']}"
+                                )
+                                # 将选择的分数存储到session_state
+                                st.session_state[f"score_value_{project_id}_{sub['code']}"] = selected_option['score']
 
-                        # 使用selectbox让用户选择评分等级
-                        selected_option = st.selectbox(
-                            f"选择评分_{indicator['code']}",
-                            options=options,
-                            format_func=lambda x: x['label'],
-                            index=default_index,
-                            key=f"score_{project_id}_{indicator['code']}"
-                        )
-                        # 将选择的分数存储到session_state
-                        st.session_state[f"score_value_{project_id}_{indicator['code']}"] = selected_option['score']
+                                # 显示当前选择的分数
+                                st.info(f"当前选择：{selected_option['label']}")
+                            else:
+                                st.warning("无评分选项")
 
-                        # 显示当前选择的分数
-                        st.info(f"当前选择：{selected_option['label']}")
-                    else:
-                        st.warning("无评分选项")
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                # 处理叶子指标（直接评分）
+                else:
+                    options = scoring_options.get(indicator['code'], [])
+
+                    # 获取当前选择的索引
+                    current_score = 0
+                    if current_scores.get('success') and current_scores['data']['dimensions']:
+                        for dim_data in current_scores['data']['dimensions'].values():
+                            for ind in dim_data['indicators']:
+                                if ind['code'] == indicator['code']:
+                                    current_score = ind['score']
+                                    break
+
+                    # 找到当前分数对应的索引
+                    default_index = 0
+                    for i, opt in enumerate(options):
+                        if opt['score'] == current_score:
+                            default_index = i
+                            break
+
+                    # 使用expander让每个指标更清晰
+                    with st.expander(f"**{indicator['name']}**（满分 {indicator['max_score']} 分）", expanded=False):
+                        if options:
+                            st.write("**请选择评分等级：**")
+
+                            # 使用selectbox让用户选择评分等级
+                            selected_option = st.selectbox(
+                                f"选择评分_{indicator['code']}",
+                                options=options,
+                                format_func=lambda x: x['label'],
+                                index=default_index,
+                                key=f"score_{project_id}_{indicator['code']}"
+                            )
+                            # 将选择的分数存储到session_state
+                            st.session_state[f"score_value_{project_id}_{indicator['code']}"] = selected_option['score']
+
+                            # 显示当前选择的分数
+                            st.info(f"当前选择：{selected_option['label']}")
+                        else:
+                            st.warning("无评分选项")
 
             st.divider()
 
@@ -482,22 +592,94 @@ def show_scoring():
 
 
 def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
-    """保存评分（使用选项方式）"""
+    """保存评分（使用选项方式）- 支持层级指标"""
     from decimal import Decimal
+    from config.scoring_rules import SCORING_DIMENSIONS
 
     success_count = 0
     error_count = 0
 
+    # 收集所有需要保存的指标评分
+    scores_to_save = []
+
     with st.spinner("正在保存评分..."):
-        for dim_code, dimension in structure.items():
+        for dim_code, dimension in SCORING_DIMENSIONS.items():
             for indicator in dimension['indicators']:
-                # 从session state获取分数
-                score_key = f"score_value_{project_id}_{indicator['code']}"
+                # 处理父指标：收集子指标评分
+                if indicator.get('type') == 'parent':
+                    sub_indicators = indicator.get('sub_indicators', [])
+                    for sub in sub_indicators:
+                        score_key = f"score_value_{project_id}_{sub['code']}"
+                        if score_key in st.session_state:
+                            scores_to_save.append({
+                                'code': sub['code'],
+                                'name': sub['name'],
+                                'score': Decimal(str(st.session_state[score_key])),
+                                'is_parent': False
+                            })
 
-                if score_key in st.session_state:
-                    score = Decimal(str(st.session_state[score_key]))
+                # 处理叶子指标：直接保存
+                else:
+                    score_key = f"score_value_{project_id}_{indicator['code']}"
+                    if score_key in st.session_state:
+                        scores_to_save.append({
+                            'code': indicator['code'],
+                            'name': indicator['name'],
+                            'score': Decimal(str(st.session_state[score_key])),
+                            'is_parent': False
+                        })
 
+        # 保存所有评分
+        for score_data in scores_to_save:
+            # 获取dimension_id
+            from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
                     # 获取dimension_id
+                    cursor.execute(
+                        "SELECT id FROM scoring_dimensions WHERE dimension_code = %s",
+                        (dim_code,)
+                    )
+                    dim_result = cursor.fetchone()
+                    if dim_result:
+                        dimension_id = dim_result['id']
+
+                        # 获取indicator_id
+                        cursor.execute(
+                            "SELECT id FROM scoring_indicators WHERE indicator_code = %s",
+                            (score_data['code'],)
+                        )
+                        ind_result = cursor.fetchone()
+                        if ind_result:
+                            indicator_id = ind_result['id']
+
+                            result = scoring_service.submit_indicator_score(
+                                project_id=project_id,
+                                dimension_id=dimension_id,
+                                indicator_id=indicator_id,
+                                raw_score=score_data['score'],
+                                scorer_id=scorer_id,
+                                scorer_comment=None
+                            )
+
+                            if result['success']:
+                                success_count += 1
+                            else:
+                                error_count += 1
+                                st.error(f"{score_data['name']}: {result['message']}")
+
+        # 保存父指标的汇总分数
+        for dim_code, dimension in SCORING_DIMENSIONS.items():
+            for indicator in dimension['indicators']:
+                if indicator.get('type') == 'parent':
+                    # 计算子指标汇总得分
+                    sub_indicators = indicator.get('sub_indicators', [])
+                    total_score = sum([
+                        float(st.session_state.get(f"score_value_{project_id}_{sub['code']}", 0))
+                        for sub in sub_indicators
+                    ])
+
+                    # 保存父指标得分
                     from app.utils.database import get_db_connection
                     with get_db_connection() as conn:
                         with conn.cursor() as cursor:
@@ -509,20 +691,22 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
                             if dim_result:
                                 dimension_id = dim_result['id']
 
-                                result = scoring_service.submit_indicator_score(
-                                    project_id=project_id,
-                                    dimension_id=dimension_id,
-                                    indicator_id=indicator['id'],
-                                    raw_score=score,
-                                    scorer_id=scorer_id,
-                                    scorer_comment=None
+                                cursor.execute(
+                                    "SELECT id FROM scoring_indicators WHERE indicator_code = %s",
+                                    (indicator['code'],)
                                 )
+                                ind_result = cursor.fetchone()
+                                if ind_result:
+                                    indicator_id = ind_result['id']
 
-                                if result['success']:
-                                    success_count += 1
-                                else:
-                                    error_count += 1
-                                    st.error(f"{indicator['name']}: {result['message']}")
+                                    result = scoring_service.submit_indicator_score(
+                                        project_id=project_id,
+                                        dimension_id=dimension_id,
+                                        indicator_id=indicator_id,
+                                        raw_score=Decimal(str(total_score)),
+                                        scorer_id=scorer_id,
+                                        scorer_comment=None
+                                    )
 
         if error_count == 0 and success_count > 0:
             with st.spinner("正在计算总分..."):

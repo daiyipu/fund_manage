@@ -7,7 +7,7 @@ from config.scoring_rules import SCORING_DIMENSIONS
 from decimal import Decimal
 
 def verify_scoring_guide_completeness():
-    """验证每个指标的scoring_guide是否覆盖完整"""
+    """验证每个指标的scoring_guide是否覆盖完整 - 支持层级指标"""
     errors = []
     warnings = []
 
@@ -15,41 +15,84 @@ def verify_scoring_guide_completeness():
         print(f"\n=== 验证维度: {dimension['name']} ({dim_code}) ===")
 
         for indicator in dimension['indicators']:
-            guide = indicator.get('scoring_guide', {})
-            max_score = Decimal(str(indicator['max_score']))
             indicator_name = f"{indicator['code']}: {indicator['name']}"
+            indicator_type = indicator.get('type', 'leaf')  # 默认为leaf
 
-            # 检查是否有scoring_guide
-            if not guide:
-                errors.append(f"{indicator_name}: 缺少scoring_guide配置")
-                continue
+            # 处理父指标（包含子指标）
+            if indicator_type == 'parent':
+                sub_indicators = indicator.get('sub_indicators', [])
 
-            # 检查是否有0分档位
-            has_zero = '0' in guide or '0.0' in guide
-            if not has_zero:
-                errors.append(f"{indicator_name}: 缺少0分档位")
+                if not sub_indicators:
+                    errors.append(f"{indicator_name}: 父指标缺少sub_indicators配置")
+                    continue
 
-            # 检查是否有满分档位
-            max_score_str = str(max_score) if max_score == int(max_score) else f"{max_score:.2f}"
-            max_score_str = max_score_str.rstrip('0').rstrip('.')
-            has_max = any(key == max_score_str or Decimal(key) == max_score for key in guide.keys())
-            if not has_max:
-                errors.append(f"{indicator_name}: 缺少{max_score}分档位")
+                # 验证所有子指标
+                for sub in sub_indicators:
+                    sub_name = f"{sub['code']}: {sub['name']}"
+                    guide = sub.get('scoring_guide', {})
+                    max_score = Decimal(str(sub['max_score']))
 
-            # 检查分数是否按降序排列
-            try:
-                scores = [Decimal(score) for score in guide.keys()]
-                if sorted(scores, reverse=True) != scores:
-                    warnings.append(f"{indicator_name}: 分数档位未按降序排列（建议但不影响功能）")
-            except Exception as e:
-                errors.append(f"{indicator_name}: 分数解析失败 - {str(e)}")
+                    if not guide:
+                        errors.append(f"{sub_name}: 子指标缺少scoring_guide配置")
+                        continue
 
-            # 显示配置信息
-            print(f"\n✓ {indicator_name}")
-            print(f"  满分: {max_score}分")
-            print(f"  档位数: {len(guide)}个")
-            print(f"  范围: {min(guide.keys())}分 - {max(guide.keys())}分")
-            print(f"  示例选项: {list(guide.values())[0] if guide else '无'}")
+                    # 检查是否有0分档位
+                    has_zero = '0' in guide or '0.0' in guide
+                    if not has_zero:
+                        errors.append(f"{sub_name}: 缺少0分档位")
+
+                    # 检查是否有满分档位
+                    max_score_str = str(max_score) if max_score == int(max_score) else f"{max_score:.2f}"
+                    max_score_str = max_score_str.rstrip('0').rstrip('.')
+                    has_max = any(key == max_score_str or Decimal(key) == max_score for key in guide.keys())
+                    if not has_max:
+                        errors.append(f"{sub_name}: 缺少{max_score}分档位")
+
+                    # 显示配置信息
+                    print(f"\n  ├─ {sub_name}")
+                    print(f"  │   满分: {max_score}分")
+                    print(f"  │   档位数: {len(guide)}个")
+                    print(f"  │   范围: {min(guide.keys())}分 - {max(guide.keys())}分")
+                    print(f"  │   示例选项: {list(guide.values())[0]}")
+
+                print(f"\n✓ {indicator_name} (父指标，含{len(sub_indicators)}个子指标)")
+
+            # 处理叶子指标（直接评分）
+            else:
+                guide = indicator.get('scoring_guide', {})
+                max_score = Decimal(str(indicator['max_score']))
+
+                # 检查是否有scoring_guide
+                if not guide:
+                    errors.append(f"{indicator_name}: 缺少scoring_guide配置")
+                    continue
+
+                # 检查是否有0分档位
+                has_zero = '0' in guide or '0.0' in guide
+                if not has_zero:
+                    errors.append(f"{indicator_name}: 缺少0分档位")
+
+                # 检查是否有满分档位
+                max_score_str = str(max_score) if max_score == int(max_score) else f"{max_score:.2f}"
+                max_score_str = max_score_str.rstrip('0').rstrip('.')
+                has_max = any(key == max_score_str or Decimal(key) == max_score for key in guide.keys())
+                if not has_max:
+                    errors.append(f"{indicator_name}: 缺少{max_score}分档位")
+
+                # 检查分数是否按降序排列
+                try:
+                    scores = [Decimal(score) for score in guide.keys()]
+                    if sorted(scores, reverse=True) != scores:
+                        warnings.append(f"{indicator_name}: 分数档位未按降序排列（建议但不影响功能）")
+                except Exception as e:
+                    errors.append(f"{indicator_name}: 分数解析失败 - {str(e)}")
+
+                # 显示配置信息
+                print(f"\n✓ {indicator_name}")
+                print(f"  满分: {max_score}分")
+                print(f"  档位数: {len(guide)}个")
+                print(f"  范围: {min(guide.keys())}分 - {max(guide.keys())}分")
+                print(f"  示例选项: {list(guide.values())[0]}")
 
     return errors, warnings
 
