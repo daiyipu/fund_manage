@@ -1,0 +1,29 @@
+# Streamlit和相关库
+streamlit==1.31.0
+streamlit-authenticator==0.2.3
+streamlit-extras==0.3.5
+
+# 数据库
+pymysql==1.1.0
+cryptography==41.0.7
+SQLAlchemy==2.0.25
+
+# 数据处理
+pandas==2.1.4
+numpy==1.26.3
+
+# 数据可视化
+plotly==5.18.0
+openpyxl==3.1.2
+kaleido==0.2.1
+
+# 工具库
+python-dotenv==1.0.0
+pydantic==2.5.3
+python-dateutil==2.8.2
+
+# 日志
+loguru==0.7.2
+
+# 密码加密
+bcrypt==4.1.2
