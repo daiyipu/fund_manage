@@ -119,8 +119,17 @@ class ScoringService:
             {'success': bool, 'message': str, 'data': dict}
         """
         try:
-            # 获取该维度下的所有评分
+            # 获取该维度的权重
             from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT weight FROM scoring_dimensions WHERE id = %s", (dimension_id,))
+                    dim_result = cursor.fetchone()
+                    if not dim_result:
+                        return {'success': False, 'message': '维度不存在'}
+                    dimension_weight = Decimal(str(dim_result['weight']))
+
+            # 获取该维度下的所有评分
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     sql = """
@@ -134,8 +143,11 @@ class ScoringService:
             if not scores:
                 return {'success': False, 'message': '该维度下暂无评分数据'}
 
-            # 计算维度汇总
-            total_score, weighted_total = self.calculator.calculate_dimension_score(scores)
+            # 计算维度汇总（传入维度权重）
+            total_score, weighted_total = self.calculator.calculate_dimension_score(
+                scores,
+                dimension_weight=dimension_weight
+            )
 
             # 保存汇总
             summary_id = self.scoring_repo.save_dimension_summary(
@@ -199,22 +211,23 @@ class ScoringService:
                 if len(summaries) < 3:
                     return {'success': False, 'message': f'评分不完整，已完成 {len(summaries)}/3 个维度，共 {scored_count}/13 个指标'}
 
-            # 构建维度得分字典
-            dimension_weighted_scores = {
-                item['dimension_code']: Decimal(str(item['weighted_total']))
+            # 构建维度得分字典（使用未加权的维度总分）
+            # 维度的权重体现在其满分上（60、30、10分），不需要再次加权
+            dimension_scores = {
+                item['dimension_code']: Decimal(str(item['total_score']))
                 for item in summaries
             }
 
             # 计算总分和等级
-            total_score, grade = self.calculator.calculate_total_score(dimension_weighted_scores)
+            total_score, grade = self.calculator.calculate_total_score(dimension_scores)
 
-            # 保存总分
+            # 保存总分（使用未加权的维度得分）
             total_id = self.scoring_repo.save_project_total(
                 project_id,
                 total_score,
-                dimension_weighted_scores.get('POLICY', Decimal('0')),
-                dimension_weighted_scores.get('LAYOUT', Decimal('0')),
-                dimension_weighted_scores.get('EXECUTION', Decimal('0')),
+                dimension_scores.get('POLICY', Decimal('0')),
+                dimension_scores.get('LAYOUT', Decimal('0')),
+                dimension_scores.get('EXECUTION', Decimal('0')),
                 grade
             )
 

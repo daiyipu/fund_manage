@@ -17,18 +17,18 @@ class ScoringCalculator:
     def calculate_indicator_score(
         raw_score: Decimal,
         max_score: Decimal,
-        weight: Decimal
+        weight: Decimal = None
     ) -> Tuple[Decimal, Decimal]:
         """
-        计算单个指标的加权得分
+        计算单个指标的得分（指标级不再加权，加权在维度级别计算）
 
         Args:
             raw_score: 原始评分
             max_score: 该指标最高分
-            weight: 权重百分比
+            weight: 权重（保留用于兼容，但不参与计算）
 
         Returns:
-            (原始评分, 加权得分)
+            (原始评分, 原始评分)  # 两者相同，用于兼容现有接口
         """
         # 验证分数不超过最高分
         if raw_score > max_score:
@@ -36,18 +36,16 @@ class ScoringCalculator:
         if raw_score < 0:
             raw_score = Decimal('0')
 
-        # 计算加权得分：原始分数 * (权重 / 100)
-        weighted_score = (raw_score * weight) / Decimal('100')
-
         # 保留2位小数
         raw_score = raw_score.quantize(Decimal('0.01'))
-        weighted_score = weighted_score.quantize(Decimal('0.01'))
 
-        return raw_score, weighted_score
+        # 返回相同的分数（加权在维度级别计算）
+        return raw_score, raw_score
 
     @staticmethod
     def calculate_dimension_score(
-        indicator_scores: List[Dict]
+        indicator_scores: List[Dict],
+        dimension_weight: Decimal = None
     ) -> Tuple[Decimal, Decimal]:
         """
         计算维度的总分和加权总分
@@ -55,6 +53,7 @@ class ScoringCalculator:
         Args:
             indicator_scores: 该维度下所有指标的评分列表
                 [{'score': Decimal, 'weighted_score': Decimal}, ...]
+            dimension_weight: 维度权重百分比（如60表示60%）
 
         Returns:
             (维度总分, 维度加权总分)
@@ -62,10 +61,17 @@ class ScoringCalculator:
         if not indicator_scores:
             return Decimal('0'), Decimal('0')
 
+        # 维度总分 = 所有指标得分相加
         total_score = sum(item['score'] for item in indicator_scores)
-        weighted_total = sum(item['weighted_score'] for item in indicator_scores)
-
         total_score = total_score.quantize(Decimal('0.01'))
+
+        # 维度加权总分 = 维度总分 × (维度权重 / 100)
+        if dimension_weight is not None:
+            weighted_total = (total_score * dimension_weight) / Decimal('100')
+        else:
+            # 如果没有提供维度权重，使用未加权总分（向后兼容）
+            weighted_total = total_score
+
         weighted_total = weighted_total.quantize(Decimal('0.01'))
 
         return total_score, weighted_total

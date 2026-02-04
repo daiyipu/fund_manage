@@ -87,24 +87,36 @@ def show_sidebar():
                 st.write(f"**部门**: {user['department']}")
             st.divider()
 
-            # 导航菜单
+            # 导航菜单 - 按正确顺序定义
             pages = {
                 'dashboard': '📈 仪表盘',
                 'projects': '📁 项目管理',
-                'results': '📊 结果展示',
                 'scoring': '📝 评分录入',
+                'results': '📊 结果展示',
                 'statistics': '📉 统计分析',
                 'admin': '⚙️ 系统管理'
             }
 
-            # 根据角色显示不同的菜单
+            # 根据角色显示不同的菜单（按正确的显示顺序）
             available_pages = ['dashboard']
+
+            # 项目管理
             if user_service.check_permission(user['role'], 'can_view_all'):
-                available_pages.extend(['projects', 'results'])
+                available_pages.append('projects')
+
+            # 评分录入
             if user_service.check_permission(user['role'], 'can_score'):
                 available_pages.append('scoring')
+
+            # 结果展示
+            if user_service.check_permission(user['role'], 'can_view_all'):
+                available_pages.append('results')
+
+            # 统计分析
             if user_service.check_permission(user['role'], 'can_view_statistics'):
                 available_pages.append('statistics')
+
+            # 系统管理
             if user_service.check_permission(user['role'], 'can_manage_users'):
                 available_pages.append('admin')
 
