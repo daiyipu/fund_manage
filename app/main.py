@@ -91,8 +91,8 @@ def show_sidebar():
             pages = {
                 'dashboard': '📈 仪表盘',
                 'projects': '📁 项目管理',
-                'scoring': '📝 评分录入',
                 'results': '📊 结果展示',
+                'scoring': '📝 评分录入',
                 'statistics': '📉 统计分析',
                 'admin': '⚙️ 系统管理'
             }
@@ -124,12 +124,17 @@ def show_sidebar():
                 key="nav_radio"  # 添加固定的key
             )
 
-            # 根据选择的标签确定页面（立即更新，无需等待第二次点击）
+            # 立即处理页面跳转（解决第一次点击无反应的问题）
             if selected_label != st.session_state.get('page_selected'):
                 for page_code, page_label in page_labels.items():
                     if page_label == selected_label:
                         st.session_state.current_page = page_code
                         st.session_state.page_selected = page_label
+                        # 立即刷新页面
+                        try:
+                            st.rerun()
+                        except AttributeError:
+                            st.experimental_rerun()
                         break
 
             st.divider()
