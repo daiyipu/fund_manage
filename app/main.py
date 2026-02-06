@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config.settings import app_config
 from core.services.scoring_service import ScoringService
 from core.services.project_service import ProjectService
+from core.services.fund_service import fund_service
+from core.services.investment_service import investment_service
 from core.services.user_service import UserService
 
 # 页面配置
@@ -23,7 +25,7 @@ st.set_page_config(
 
 # 初始化服务
 scoring_service = ScoringService()
-project_service = ProjectService()
+project_service = ProjectService()  # 保留用于向后兼容
 user_service = UserService()
 
 
@@ -90,7 +92,8 @@ def show_sidebar():
             # 导航菜单 - 按正确顺序定义
             pages = {
                 'dashboard': '📈 仪表盘',
-                'projects': '📁 项目管理',
+                'funds': '💰 基金管理',
+                'investments': '📁 投资管理',
                 'scoring': '📝 评分录入',
                 'results': '📊 结果展示',
                 'statistics': '📉 统计分析',
@@ -100,9 +103,13 @@ def show_sidebar():
             # 根据角色显示不同的菜单（按正确的显示顺序）
             available_pages = ['dashboard']
 
-            # 项目管理
+            # 基金管理
             if user_service.check_permission(user['role'], 'can_view_all'):
-                available_pages.append('projects')
+                available_pages.append('funds')
+
+            # 投资管理
+            if user_service.check_permission(user['role'], 'can_view_all'):
+                available_pages.append('investments')
 
             # 评分录入
             if user_service.check_permission(user['role'], 'can_score'):
@@ -238,6 +245,193 @@ def show_dashboard():
         st.info("暂无项目数据")
 
 
+def show_fund_management():
+    """显示基金管理页面"""
+    st.title("💰 基金管理")
+
+    # 创建基金按钮
+    with st.expander("➕ 创建新基金", expanded=False):
+        with st.form("create_fund_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                fund_code = st.text_input("基金编码*", placeholder="如: FUND001")
+                fund_name = st.text_input("基金名称*", placeholder="输入基金名称")
+                fund_manager = st.text_input("基金管理人*", placeholder="输入基金管理人")
+            with col2:
+                total_amount = st.number_input("基金总规模（万元）", min_value=0.0, value=0.0, step=1000.0)
+                establishment_date = st.date_input("成立日期")
+                fund_type = st.selectbox("基金类型", ["产业投资基金", "创业投资基金", "并购投资基金", "其他"])
+
+            col3, col4 = st.columns(2)
+            with col3:
+                region = st.text_input("注册地区", placeholder="如: 北京市")
+                department = st.text_input("主管部门", placeholder="如: 财政局")
+            with col4:
+                description = st.text_area("基金描述", placeholder="输入基金描述")
+
+            submitted = st.form_submit_button("创建基金", use_container_width=True, type="primary")
+
+            if submitted:
+                if not fund_code or not fund_name or not fund_manager:
+                    st.error("基金编码、基金名称和基金管理人为必填项")
+                else:
+                    user = st.session_state.get('user')
+
+                    fund_data = {
+                        'fund_code': fund_code,
+                        'fund_name': fund_name,
+                        'fund_manager': fund_manager,
+                        'total_amount': total_amount if total_amount > 0 else None,
+                        'establishment_date': establishment_date,
+                        'fund_type': fund_type,
+                        'region': region if region else None,
+                        'department': department if department else None,
+                        'description': description if description else None,
+                        'status': 'active',
+                        'created_by': user['id'] if user else 1
+                    }
+
+                    result = fund_service.create_fund(fund_data)
+                    if result['success']:
+                        st.success(f"✅ {result['message']}")
+                        st.balloons()
+                    else:
+                        st.error(f"❌ {result['message']}")
+
+    st.divider()
+
+    # 筛选条件
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        status_filter = st.selectbox("状态", ["全部", "draft", "active", "completed", "archived"], index=1, key="fm_status")
+    with col2:
+        region_filter = st.text_input("地区", key="fm_region")
+    with col3:
+        fund_type_filter = st.text_input("基金类型", key="fm_type")
+
+    # 获取基金列表
+    status = None if status_filter == "全部" else status_filter
+    funds = fund_service.list_funds(
+        status=status,
+        region=region_filter if region_filter else None,
+        fund_type=fund_type_filter if fund_type_filter else None
+    )
+
+    # 显示基金列表
+    if funds:
+        import pandas as pd
+        df = pd.DataFrame(funds)
+        df['创建时间'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d')
+
+        st.dataframe(
+            df[['fund_code', 'fund_name', 'fund_manager', 'total_amount', 'fund_type', 'region', 'status', '创建时间']],
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("暂无基金数据，请先创建基金")
+
+
+def show_investment_management():
+    """显示投资管理页面"""
+    st.title("📁 投资管理")
+
+    # 首先选择基金
+    funds = fund_service.list_funds(status='active')
+
+    if not funds:
+        st.warning("暂无可用基金，请先创建基金")
+        return
+
+    # 基金选择
+    fund_options = {f"{f['fund_code']} - {f['fund_name']}": f['id'] for f in funds}
+    selected_fund = st.selectbox("选择基金", list(fund_options.keys()))
+
+    if not selected_fund:
+        return
+
+    fund_id = fund_options[selected_fund]
+
+    st.divider()
+
+    # 创建投资按钮
+    with st.expander("➕ 创建新投资", expanded=False):
+        with st.form("create_investment_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                investment_code = st.text_input("投资编码*", placeholder="如: INV001")
+                investment_name = st.text_input("投资名称*", placeholder="输入投资名称")
+            with col2:
+                investment_amount = st.number_input("投资金额（万元）", min_value=0.0, value=0.0, step=100.0)
+                investment_date = st.date_input("投资日期")
+
+            col3, col4 = st.columns(2)
+            with col3:
+                industry = st.text_input("投向行业", placeholder="如: 新能源")
+                investment_stage = st.selectbox("投资阶段", ["seed", "early", "growth", "mature"], index=1)
+            with col4:
+                description = st.text_area("投资描述", placeholder="输入投资描述")
+
+            submitted = st.form_submit_button("创建投资", use_container_width=True, type="primary")
+
+            if submitted:
+                if not investment_code or not investment_name:
+                    st.error("投资编码和投资名称为必填项")
+                else:
+                    user = st.session_state.get('user')
+
+                    investment_data = {
+                        'fund_id': fund_id,
+                        'investment_code': investment_code,
+                        'investment_name': investment_name,
+                        'investment_amount': investment_amount if investment_amount > 0 else None,
+                        'investment_date': investment_date,
+                        'industry': industry if industry else None,
+                        'investment_stage': investment_stage,
+                        'description': description if description else None,
+                        'status': 'submitted',
+                        'created_by': user['id'] if user else 1
+                    }
+
+                    result = investment_service.create_investment(investment_data)
+                    if result['success']:
+                        st.success(f"✅ {result['message']}")
+                        st.balloons()
+                    else:
+                        st.error(f"❌ {result['message']}")
+
+    st.divider()
+
+    # 筛选条件
+    col1, col2 = st.columns(2)
+    with col1:
+        status_filter = st.selectbox("状态", ["全部", "draft", "submitted", "scoring", "completed", "archived"], index=2, key="im_status")
+    with col2:
+        industry_filter = st.text_input("行业", key="im_industry")
+
+    # 获取投资列表
+    status = None if status_filter == "全部" else status_filter
+    investments = investment_service.list_investments(
+        fund_id=fund_id,
+        status=status,
+        industry=industry_filter if industry_filter else None
+    )
+
+    # 显示投资列表
+    if investments:
+        import pandas as pd
+        df = pd.DataFrame(investments)
+        df['创建时间'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d')
+
+        st.dataframe(
+            df[['investment_code', 'investment_name', 'investment_amount', 'industry', 'investment_stage', 'status', '创建时间']],
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("该基金下暂无投资数据，请先创建投资")
+
+
 def show_project_management():
     """显示项目管理页面"""
     st.title("📁 项目管理")
@@ -346,31 +540,31 @@ def show_scoring():
 
     st.markdown("---")
 
-    # 获取待评分项目
-    projects = project_service.get_projects_for_scoring()
+    # 获取待评分基金
+    funds = fund_service.list_funds(status='active')
 
-    if not projects:
-        st.warning("暂无待评分项目")
+    if not funds:
+        st.warning("暂无待评分基金")
         return
 
-    # 项目选择
-    project_options = {f"{p['project_code']} - {p['project_name']}": p['id'] for p in projects}
-    selected = st.selectbox("选择项目", list(project_options.keys()))
+    # 基金选择
+    fund_options = {f"{f['fund_code']} - {f['fund_name']}": f['id'] for f in funds}
+    selected = st.selectbox("选择基金", list(fund_options.keys()))
 
     if not selected:
         return
 
-    project_id = project_options[selected]
-    project = project_service.get_project(project_id)
+    fund_id = fund_options[selected]
+    fund = fund_service.get_fund(fund_id)
 
-    # 显示项目信息
+    # 显示基金信息
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.info(f"**基金名称**: {project.get('fund_name', '-')}")
+        st.info(f"**基金规模**: {fund.get('total_amount', 0)} 万元")
     with col2:
-        st.info(f"**投资金额**: {project.get('investment_amount', 0)} 万元")
+        st.info(f"**基金管理人**: {fund.get('fund_manager', '-')}")
     with col3:
-        st.info(f"**所属行业**: {project.get('industry', '-')}")
+        st.info(f"**基金类型**: {fund.get('fund_type', '-')}")
 
     st.divider()
 
@@ -382,7 +576,7 @@ def show_scoring():
     st.subheader("评分指标")
 
     # 获取当前评分
-    current_scores = scoring_service.get_project_scoring_detail(project_id)
+    current_scores = scoring_service.get_fund_scoring_detail(fund_id)
 
     # 为每个指标创建评分选项（包括子指标）
     scoring_options = {}
@@ -588,10 +782,10 @@ def show_scoring():
             submitted = st.form_submit_button("💾 保存评分", use_container_width=True)
 
         if submitted:
-            save_scores_with_options(project_id, structure, user['id'])
+            save_scores_with_options(fund_id, structure, user['id'])
 
 
-def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
+def save_scores_with_options(fund_id: int, structure: dict, scorer_id: int):
     """保存评分（使用选项方式）- 支持层级指标"""
     from decimal import Decimal
     from config.scoring_rules import SCORING_DIMENSIONS
@@ -609,7 +803,7 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
                 if indicator.get('type') == 'parent':
                     sub_indicators = indicator.get('sub_indicators', [])
                     for sub in sub_indicators:
-                        score_key = f"score_value_{project_id}_{sub['code']}"
+                        score_key = f"score_value_{fund_id}_{sub['code']}"
                         if score_key in st.session_state:
                             scores_to_save.append({
                                 'code': sub['code'],
@@ -620,7 +814,7 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
 
                 # 处理叶子指标：直接保存
                 else:
-                    score_key = f"score_value_{project_id}_{indicator['code']}"
+                    score_key = f"score_value_{fund_id}_{indicator['code']}"
                     if score_key in st.session_state:
                         scores_to_save.append({
                             'code': indicator['code'],
@@ -653,8 +847,8 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
                         if ind_result:
                             indicator_id = ind_result['id']
 
-                            result = scoring_service.submit_indicator_score(
-                                project_id=project_id,
+                            result = scoring_service.submit_investment_indicator_score(
+                                fund_id=fund_id,
                                 dimension_id=dimension_id,
                                 indicator_id=indicator_id,
                                 raw_score=score_data['score'],
@@ -675,7 +869,7 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
                     # 计算子指标汇总得分
                     sub_indicators = indicator.get('sub_indicators', [])
                     total_score = sum([
-                        float(st.session_state.get(f"score_value_{project_id}_{sub['code']}", 0))
+                        float(st.session_state.get(f"score_value_{fund_id}_{sub['code']}", 0))
                         for sub in sub_indicators
                     ])
 
@@ -699,8 +893,8 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
                                 if ind_result:
                                     indicator_id = ind_result['id']
 
-                                    result = scoring_service.submit_indicator_score(
-                                        project_id=project_id,
+                                    result = scoring_service.submit_investment_indicator_score(
+                                        fund_id=fund_id,
                                         dimension_id=dimension_id,
                                         indicator_id=indicator_id,
                                         raw_score=Decimal(str(total_score)),
@@ -721,12 +915,12 @@ def save_scores_with_options(project_id: int, structure: dict, scorer_id: int):
                             )
                             dim_result = cursor.fetchone()
                             if dim_result:
-                                scoring_service.calculate_and_save_dimension_score(
-                                    project_id, dim_result['id']
+                                scoring_service.calculate_and_save_investment_dimension_score(
+                                    fund_id, dim_result['id']
                                 )
 
                 # 计算总分
-                total_result = scoring_service.calculate_project_total_score(project_id)
+                total_result = scoring_service.calculate_investment_total_score(fund_id)
 
                 if total_result['success']:
                     st.success(f"✅ 评分保存成功！总分: {total_result['data']['total_score']:.2f}，等级: {total_result['data']['grade_name']}")
@@ -751,24 +945,36 @@ def show_results():
     """显示结果展示页面"""
     st.title("📊 结果展示")
 
-    # 获取已评分的项目
-    projects = project_service.list_projects(status='completed')
+    # 获取已评分的基金
+    funds = fund_service.list_funds(status='active')
 
-    if not projects:
-        st.info("暂无已完成评分的项目")
+    # 筛选出有评分的基金
+    funds_with_scores = []
+    for fund in funds:
+        # 检查是否有评分记录
+        from app.utils.database import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) as count FROM fund_total_scores WHERE fund_id = %s", (fund['id'],))
+                result = cursor.fetchone()
+                if result and result['count'] > 0:
+                    funds_with_scores.append(fund)
+
+    if not funds_with_scores:
+        st.info("暂无已完成评分的基金")
         return
 
-    # 项目选择
-    project_options = {f"{p['project_code']} - {p['project_name']}": p['id'] for p in projects}
-    selected = st.selectbox("选择项目", list(project_options.keys()))
+    # 基金选择
+    fund_options = {f"{f['fund_code']} - {f['fund_name']}": f['id'] for f in funds_with_scores}
+    selected = st.selectbox("选择基金", list(fund_options.keys()))
 
     if not selected:
         return
 
-    project_id = project_options[selected]
+    fund_id = fund_options[selected]
 
     # 获取评分详情
-    detail = scoring_service.get_project_scoring_detail(project_id)
+    detail = scoring_service.get_fund_scoring_detail(fund_id)
 
     if not detail.get('success'):
         st.error(detail.get('message', '获取评分详情失败'))
@@ -791,7 +997,33 @@ def show_results():
         st.metric("排名", f"第 {rank} 名" if rank else "-")
 
     with col4:
-        st.metric("项目状态", data['project']['status'])
+        fund = fund_service.get_fund(fund_id)
+        st.metric("基金状态", fund['status'] if fund else '-')
+
+    st.divider()
+
+    # 下载评分报告按钮
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("📥 下载评分报告", type="primary", use_container_width=True):
+            from core.services.export_service import export_service
+            from datetime import datetime
+
+            try:
+                excel_data = export_service.export_scoring_report_excel(fund_id)
+
+                fund = fund_service.get_fund(fund_id)
+                filename = f"评分报告_{fund['fund_code']}_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+
+                st.download_button(
+                    label="点击下载 Excel 文件",
+                    data=excel_data,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"生成报告失败: {str(e)}")
 
     st.divider()
 
@@ -877,8 +1109,12 @@ def main():
 
     if page == 'dashboard':
         show_dashboard()
+    elif page == 'funds':
+        show_fund_management()
+    elif page == 'investments':
+        show_investment_management()
     elif page == 'projects':
-        show_project_management()
+        show_project_management()  # 保留向后兼容
     elif page == 'scoring':
         show_scoring()
     elif page == 'results':

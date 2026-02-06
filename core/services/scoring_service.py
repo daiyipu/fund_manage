@@ -358,3 +358,335 @@ class ScoringService:
         except Exception as e:
             logger.error(f"Error getting dimension averages: {str(e)}")
             return {}
+
+    # ==================== Investment 相关方法 ====================
+
+    def submit_fund_indicator_score(
+        self,
+        investment_id: int,
+        dimension_id: int,
+        indicator_id: int,
+        raw_score: Decimal,
+        scorer_id: int,
+        scorer_comment: Optional[str] = None
+    ) -> Dict:
+        """
+        提交投资的单个指标评分
+
+        Returns:
+            {'success': bool, 'message': str, 'data': dict}
+        """
+        try:
+            # 获取指标信息
+            from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = "SELECT weight, max_score FROM scoring_indicators WHERE id = %s"
+                    cursor.execute(sql, (indicator_id,))
+                    indicator = cursor.fetchone()
+
+            if not indicator:
+                return {'success': False, 'message': '指标不存在'}
+
+            # 计算加权得分
+            score, weighted_score = self.calculator.calculate_indicator_score(
+                Decimal(str(raw_score)),
+                Decimal(str(indicator['max_score'])),
+                Decimal(str(indicator['weight']))
+            )
+
+            # 保存评分
+            score_id = self.scoring_repo.save_investment_score(
+                investment_id, dimension_id, indicator_id,
+                score, weighted_score, scorer_id, scorer_comment
+            )
+
+            logger.info(f"Saved investment score: investment={investment_id}, indicator={indicator_id}, score={score}")
+
+            return {
+                'success': True,
+                'message': '评分保存成功',
+                'data': {
+                    'score_id': score_id,
+                    'score': float(score),
+                    'weighted_score': float(weighted_score)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error submitting investment score: {str(e)}")
+            return {'success': False, 'message': f'保存失败: {str(e)}'}
+
+    def calculate_and_save_fund_dimension_score(
+        self,
+        investment_id: int,
+        dimension_id: int
+    ) -> Dict:
+        """
+        计算并保存投资的维度汇总得分
+
+        Returns:
+            {'success': bool, 'message': str, 'data': dict}
+        """
+        try:
+            # 获取该维度的权重
+            from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT weight FROM scoring_dimensions WHERE id = %s", (dimension_id,))
+                    dim_result = cursor.fetchone()
+                    if not dim_result:
+                        return {'success': False, 'message': '维度不存在'}
+                    dimension_weight = Decimal(str(dim_result['weight']))
+
+            # 获取该维度下的所有评分
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = """
+                        SELECT score, weighted_score
+                        FROM investment_scores
+                        WHERE investment_id = %s AND dimension_id = %s
+                    """
+                    cursor.execute(sql, (investment_id, dimension_id))
+                    scores = cursor.fetchall()
+
+            if not scores:
+                return {'success': False, 'message': '该维度下暂无评分数据'}
+
+            # 计算维度汇总（传入维度权重）
+            total_score, weighted_total = self.calculator.calculate_dimension_score(
+                scores,
+                dimension_weight=dimension_weight
+            )
+
+            # 保存汇总
+            summary_id = self.scoring_repo.save_investment_dimension_summary(
+                investment_id, dimension_id, total_score, weighted_total
+            )
+
+            return {
+                'success': True,
+                'message': '维度汇总计算完成',
+                'data': {
+                    'summary_id': summary_id,
+                    'total_score': float(total_score),
+                    'weighted_total': float(weighted_total)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error calculating investment dimension score: {str(e)}")
+            return {'success': False, 'message': f'计算失败: {str(e)}'}
+
+    def calculate_fund_total_score(self, investment_id: int) -> Dict:
+        """
+        计算投资总分并评级
+
+        Returns:
+            {'success': bool, 'message': str, 'data': dict}
+        """
+        try:
+            from core.repositories.investment_repository import InvestmentRepository
+
+            # 获取各维度汇总
+            from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = """
+                        SELECT iss.*, sd.dimension_code
+                        FROM investment_scoring_summary iss
+                        JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
+                        WHERE iss.investment_id = %s
+                        ORDER BY sd.display_order
+                    """
+                    cursor.execute(sql, (investment_id,))
+                    summaries = cursor.fetchall()
+
+            if len(summaries) < 3:
+                # 检查是否所有指标都有评分
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT COUNT(DISTINCT indicator_id) as scored_count FROM investment_scores WHERE investment_id = %s",
+                            (investment_id,)
+                        )
+                        result = cursor.fetchone()
+                        scored_count = result['scored_count'] if result else 0
+
+                # 总共20个指标（13个拆分为20个）
+                if scored_count >= 20:
+                    # 重新计算所有维度的汇总
+                    for dim_code in ['POLICY', 'LAYOUT', 'EXECUTION']:
+                        from app.utils.database import get_db_connection
+                        with get_db_connection() as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT id FROM scoring_dimensions WHERE dimension_code = %s",
+                                    (dim_code,)
+                                )
+                                dim_result = cursor.fetchone()
+                                if dim_result:
+                                    self.calculate_and_save_fund_dimension_score(investment_id, dim_result['id'])
+
+                    # 重新获取维度汇总
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cursor:
+                            sql = """
+                                SELECT iss.*, sd.dimension_code
+                                FROM investment_scoring_summary iss
+                                JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
+                                WHERE iss.investment_id = %s
+                                ORDER BY sd.display_order
+                            """
+                            cursor.execute(sql, (investment_id,))
+                            summaries = cursor.fetchall()
+
+                if len(summaries) < 3:
+                    return {'success': False, 'message': f'评分不完整，已完成 {len(summaries)}/3 个维度，共 {scored_count}/20 个指标'}
+
+            # 构建维度得分字典
+            dimension_scores = {
+                item['dimension_code']: Decimal(str(item['total_score']))
+                for item in summaries
+            }
+
+            # 计算总分和等级
+            total_score, grade = self.calculator.calculate_total_score(dimension_scores)
+
+            # 保存总分
+            total_id = self.scoring_repo.save_investment_total(
+                investment_id,
+                total_score,
+                dimension_scores.get('POLICY', Decimal('0')),
+                dimension_scores.get('LAYOUT', Decimal('0')),
+                dimension_scores.get('EXECUTION', Decimal('0')),
+                grade
+            )
+
+            # 更新排名
+            self._update_fund_rankings()
+
+            # 更新投资状态
+            investment_repo = InvestmentRepository()
+            investment_repo.update_status(investment_id, 'completed')
+
+            logger.info(f"Calculated total score for investment {investment_id}: {total_score} ({grade})")
+
+            return {
+                'success': True,
+                'message': '总分计算完成',
+                'data': {
+                    'total_id': total_id,
+                    'total_score': float(total_score),
+                    'grade': grade,
+                    'grade_name': self.calculator.get_grade_name(grade)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error calculating investment total score: {str(e)}")
+            return {'success': False, 'message': f'计算失败: {str(e)}'}
+
+    def _update_fund_rankings(self):
+        """更新所有投资排名"""
+        try:
+            # 获取所有已完成的 investment 总分
+            all_totals = self.scoring_repo.get_all_investment_totals()
+
+            # 计算排名
+            ranked = self.calculator.calculate_project_ranking(all_totals)
+
+            # 更新数据库（将 project_id 改为 investment_id）
+            rankings = [{'rank': r['rank'], 'investment_id': r['project_id']} for r in ranked]
+            self.scoring_repo.update_investment_rankings(rankings)
+
+            logger.info("Updated investment rankings")
+        except Exception as e:
+            logger.error(f"Error updating investment rankings: {str(e)}")
+
+    def get_fund_scoring_detail(self, fund_id: int) -> Dict:
+        """获取基金评分详情"""
+        try:
+            # 获取基金基本信息
+            fund = fund_service.get_fund(fund_id)
+            if not fund:
+                return {'success': False, 'message': '基金不存在'}
+
+            # 获取所有评分记录
+            scores = self.scoring_repo.get_fund_scores(fund_id)
+
+            # 获取总分
+            total = self.scoring_repo.get_fund_total_score(fund_id)
+
+            # 按维度组织评分数据
+            dimension_details = {}
+            for score in scores:
+                dim_code = score['dimension_code']
+                if dim_code not in dimension_details:
+                    dimension_details[dim_code] = {
+                        'name': score['dimension_name'],
+                        'indicators': []
+                    }
+                dimension_details[dim_code]['indicators'].append({
+                    'code': score['indicator_code'],
+                    'name': score['indicator_name'],
+                    'score': float(score['score']),
+                    'weighted_score': float(score['weighted_score']),
+                    'scorer': score['scorer_name'],
+                    'comment': score['scorer_comment'],
+                    'scored_at': score['scored_at'].isoformat() if score['scored_at'] else None
+                })
+
+            return {
+                'success': True,
+                'data': {
+                    'fund': {
+                        'id': fund['id'],
+                        'code': fund['fund_code'],
+                        'name': fund['fund_name'],
+                        'status': fund['status']
+                    },
+                    'dimensions': dimension_details,
+                    'total_score': float(total['total_score']) if total else None,
+                    'grade': total['grade'] if total else None,
+                    'grade_name': self.calculator.get_grade_name(total['grade']) if total and total['grade'] else None,
+                    'rank': total['rank_in_period'] if total else None
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting fund scoring detail: {str(e)}")
+            return {'success': False, 'message': f'获取失败: {str(e)}'}
+
+    def get_fund_grade_distribution(self) -> Dict[str, int]:
+        """获取投资等级分布统计"""
+        try:
+            from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = """
+                        SELECT grade, COUNT(*) as count
+                        FROM investment_total_scores
+                        GROUP BY grade
+                    """
+                    cursor.execute(sql)
+                    results = cursor.fetchall()
+                    return {r['grade']: r['count'] for r in results}
+        except Exception as e:
+            logger.error(f"Error getting investment grade distribution: {str(e)}")
+            return {}
+
+    def get_fund_dimension_averages(self) -> Dict[str, float]:
+        """获取投资各维度平均分"""
+        try:
+            from app.utils.database import get_db_connection
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    sql = """
+                        SELECT sd.dimension_code, AVG(iss.weighted_total) as avg_score
+                        FROM investment_scoring_summary iss
+                        JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
+                        GROUP BY sd.dimension_code
+                    """
+                    cursor.execute(sql)
+                    results = cursor.fetchall()
+                    return {r['dimension_code']: float(r['avg_score']) for r in results}
+        except Exception as e:
+            logger.error(f"Error getting investment dimension averages: {str(e)}")
+            return {}
