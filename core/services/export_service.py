@@ -13,7 +13,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 from config.scoring_rules import SCORING_DIMENSIONS
-from core.repositories.investment_repository import InvestmentRepository
+from core.repositories.fund_repository import FundRepository
 from core.repositories.scoring_repository import ScoringRepository
 from app.utils.database import get_db_connection
 
@@ -24,7 +24,7 @@ class ExportService:
     """评分报告导出服务"""
 
     def __init__(self):
-        self.investment_repo = InvestmentRepository()
+        self.fund_repo = FundRepository()
         self.scoring_repo = ScoringRepository()
 
     def export_scoring_report_excel(self, fund_id: int) -> bytes:
@@ -32,16 +32,16 @@ class ExportService:
         导出评分报告为Excel文件
 
         Args:
-            fund_id: 投资ID
+            fund_id: 基金ID
 
         Returns:
             Excel文件的字节流
         """
         try:
-            # 获取投资信息
-            investment = self.investment_repo.get_by_id(fund_id)
-            if not investment:
-                raise ValueError(f"投资 {fund_id} 不存在")
+            # 获取基金信息
+            fund = self.fund_repo.get_by_id(fund_id)
+            if not fund:
+                raise ValueError(f"基金 {fund_id} 不存在")
 
             # 获取评分详情
             scoring_detail = self._get_fund_scoring_detail(fund_id)
@@ -51,11 +51,13 @@ class ExportService:
             wb.remove(wb.active)  # 删除默认sheet
 
             # 创建总览sheet
-            self._create_overview_sheet(wb, investment, scoring_detail)
+            self._create_overview_sheet(wb, fund, scoring_detail)
 
             # 创建各维度详情sheet
+            dim_idx = 0
             for dim_code, dim_data in scoring_detail.get('dimensions', {}).items():
-                self._create_dimension_sheet(wb, dim_code, dim_data, scoring_detail)
+                dim_idx += 1
+                self._create_dimension_sheet(wb, dim_code, dim_data, scoring_detail, dim_idx)
 
             # 保存到字节流
             output = io.BytesIO()
@@ -194,17 +196,15 @@ class ExportService:
         # 空行
         row += 2
 
-        # 评分结果
-        ws[f'A{row}'] = '总分'
-        ws[f'A{row}'].font = Font(bold=True)
-        ws[f'B{row}'] = scoring_detail.get('total_score', 0)
-        ws[f'B{row}'].font = Font(bold=True, color="0066CC")
+        # 维度得分
+        ws[f'A{row}'] = '政策符合性'
+        ws[f'B{row}'] = scoring_detail.get('policy_score', 0)
         row += 1
-        ws[f'A{row}'] = '等级'
-        ws[f'B{row}'] = scoring_detail.get('grade', '-')
+        ws[f'A{row}'] = '优化生产力布局'
+        ws[f'B{row}'] = scoring_detail.get('layout_score', 0)
         row += 1
-        ws[f'A{row}'] = '排名'
-        ws[f'B{row}'] = f"第 {scoring_detail.get('rank', '-')} 名" if scoring_detail.get('rank') else '-'
+        ws[f'A{row}'] = '政策执行能力'
+        ws[f'B{row}'] = scoring_detail.get('execution_score', 0)
 
         # 列宽
         ws.column_dimensions['A'].width = 15
@@ -222,7 +222,7 @@ class ExportService:
                 ws[f'{c}{r}'].border = thin_border
                 ws[f'{c}{r}'].alignment = Alignment(horizontal='left', vertical='center')
 
-    def _create_dimension_sheet(self, wb: Workbook, dim_code: str, dim_data: dict, scoring_detail: dict):
+    def _create_dimension_sheet(self, wb: Workbook, dim_code: str, dim_data: dict, scoring_detail: dict, dim_idx: int):
         """创建维度详情sheet"""
         # 从 SCORING_DIMENSIONS 获取维度名称
         dim_config = SCORING_DIMENSIONS.get(dim_code, {})
@@ -231,7 +231,7 @@ class ExportService:
         ws = wb.create_sheet(dim_name)
 
         # 构建层级嵌套数据
-        rows = self._build_dimension_rows(dim_code, dim_data, dim_config)
+        rows = self._build_dimension_rows(dim_code, dim_data, dim_config, dim_idx)
 
         # 表头
         headers = ['维度', '指标', '子指标', '得分', '满分', '权重(%)', '加权得分', '评分人', '评分时间']
@@ -275,13 +275,16 @@ class ExportService:
                 cell.border = thin_border
                 cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    def _build_dimension_rows(self, dim_code: str, dim_data: dict, dim_config: dict) -> List[list]:
+    def _build_dimension_rows(self, dim_code: str, dim_data: dict, dim_config: dict, dim_idx: int) -> List[list]:
         """构建维度数据的层级嵌套行"""
         rows = []
         dim_name = dim_config.get('name', dim_code)
+        dim_name_with_number = f"{dim_idx}. {dim_name}"
 
         # 遍历指标
+        ind_idx = 0
         for indicator in dim_config.get('indicators', []):
+            ind_idx += 1
             ind_code = indicator['code']
             ind_name = indicator['name']
             ind_max_score = indicator.get('max_score', 0)
@@ -296,8 +299,8 @@ class ExportService:
                 )
                 if score_data:
                     rows.append([
-                        dim_name,
-                        ind_name,
+                        dim_name_with_number,
+                        f"{dim_idx}.{ind_idx} {ind_name}",
                         '-',
                         score_data['score'],
                         ind_max_score,
@@ -313,7 +316,9 @@ class ExportService:
                 subtotal_score = 0
                 subtotal_max = ind_max_score
 
+                sub_idx = 0
                 for sub_ind in sub_indicators:
+                    sub_idx += 1
                     sub_code = sub_ind['code']
                     sub_name = sub_ind['name']
                     sub_max = sub_ind.get('max_score', 0)
@@ -325,9 +330,9 @@ class ExportService:
                     if score_data:
                         subtotal_score += score_data['score']
                         rows.append([
-                            dim_name,
-                            ind_name,
-                            sub_name,
+                            dim_name_with_number,
+                            f"{dim_idx}.{ind_idx} {ind_name}",
+                            f"{dim_idx}.{ind_idx}.{sub_idx} {sub_name}",
                             score_data['score'],
                             sub_max,
                             f"{sub_ind.get('weight', 0):.2f}",
@@ -339,8 +344,8 @@ class ExportService:
                 # 添加小计行
                 if subtotal_score > 0:
                     rows.append([
-                        dim_name,
-                        ind_name,
+                        dim_name_with_number,
+                        f"{dim_idx}.{ind_idx} {ind_name}",
                         '**小计**',
                         subtotal_score,
                         subtotal_max,
@@ -355,7 +360,7 @@ class ExportService:
         dim_max = dim_config.get('max_score', 0)
         dim_weight = dim_config.get('weight', 0)
         rows.append([
-            f'**{dim_name}合计**',
+            f'**{dim_name_with_number}合计**',
             '-',
             '-',
             dim_total,

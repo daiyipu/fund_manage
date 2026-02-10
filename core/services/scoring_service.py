@@ -9,6 +9,7 @@ from core.repositories.scoring_repository import ScoringRepository
 from core.repositories.project_repository import ProjectRepository
 from app.utils.scoring import ScoringCalculator
 from config.scoring_rules import SCORING_DIMENSIONS
+from core.services.fund_service import fund_service
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +191,8 @@ class ScoringService:
                         result = cursor.fetchone()
                         scored_count = result['scored_count'] if result else 0
 
-                # 总共13个指标，如果全部评分完成，计算总分
-                if scored_count >= 13:
+                # 总共26个指标，如果全部评分完成，计算总分
+                if scored_count >= 26:
                     # 重新计算所有维度的汇总（确保数据同步）
                     for dim_code in ['POLICY', 'LAYOUT', 'EXECUTION']:
                         from app.utils.database import get_db_connection
@@ -209,7 +210,7 @@ class ScoringService:
                     summaries = self.scoring_repo.get_dimension_summaries(project_id)
 
                 if len(summaries) < 3:
-                    return {'success': False, 'message': f'评分不完整，已完成 {len(summaries)}/3 个维度，共 {scored_count}/13 个指标'}
+                    return {'success': False, 'message': f'评分不完整，已完成 {len(summaries)}/3 个维度，共 {scored_count}/26 个指标'}
 
             # 构建维度得分字典（使用未加权的维度总分）
             # 维度的权重体现在其满分上（60、30、10分），不需要再次加权
@@ -363,7 +364,7 @@ class ScoringService:
 
     def submit_fund_indicator_score(
         self,
-        investment_id: int,
+        fund_id: int,
         dimension_id: int,
         indicator_id: int,
         raw_score: Decimal,
@@ -396,12 +397,12 @@ class ScoringService:
             )
 
             # 保存评分
-            score_id = self.scoring_repo.save_investment_score(
-                investment_id, dimension_id, indicator_id,
+            score_id = self.scoring_repo.save_fund_score(
+                fund_id, dimension_id, indicator_id,
                 score, weighted_score, scorer_id, scorer_comment
             )
 
-            logger.info(f"Saved investment score: investment={investment_id}, indicator={indicator_id}, score={score}")
+            logger.info(f"Saved fund score: fund={fund_id}, indicator={indicator_id}, score={score}")
 
             return {
                 'success': True,
@@ -418,7 +419,7 @@ class ScoringService:
 
     def calculate_and_save_fund_dimension_score(
         self,
-        investment_id: int,
+        fund_id: int,
         dimension_id: int
     ) -> Dict:
         """
@@ -443,10 +444,10 @@ class ScoringService:
                 with conn.cursor() as cursor:
                     sql = """
                         SELECT score, weighted_score
-                        FROM investment_scores
-                        WHERE investment_id = %s AND dimension_id = %s
+                        FROM fund_scores
+                        WHERE fund_id = %s AND dimension_id = %s
                     """
-                    cursor.execute(sql, (investment_id, dimension_id))
+                    cursor.execute(sql, (fund_id, dimension_id))
                     scores = cursor.fetchall()
 
             if not scores:
@@ -459,8 +460,8 @@ class ScoringService:
             )
 
             # 保存汇总
-            summary_id = self.scoring_repo.save_investment_dimension_summary(
-                investment_id, dimension_id, total_score, weighted_total
+            summary_id = self.scoring_repo.save_fund_dimension_summary(
+                fund_id, dimension_id, total_score, weighted_total
             )
 
             return {
@@ -476,7 +477,7 @@ class ScoringService:
             logger.error(f"Error calculating investment dimension score: {str(e)}")
             return {'success': False, 'message': f'计算失败: {str(e)}'}
 
-    def calculate_fund_total_score(self, investment_id: int) -> Dict:
+    def calculate_fund_total_score(self, fund_id: int) -> Dict:
         """
         计算投资总分并评级
 
@@ -492,12 +493,12 @@ class ScoringService:
                 with conn.cursor() as cursor:
                     sql = """
                         SELECT iss.*, sd.dimension_code
-                        FROM investment_scoring_summary iss
+                        FROM fund_scoring_summary iss
                         JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
-                        WHERE iss.investment_id = %s
+                        WHERE iss.fund_id = %s
                         ORDER BY sd.display_order
                     """
-                    cursor.execute(sql, (investment_id,))
+                    cursor.execute(sql, (fund_id,))
                     summaries = cursor.fetchall()
 
             if len(summaries) < 3:
@@ -505,14 +506,14 @@ class ScoringService:
                 with get_db_connection() as conn:
                     with conn.cursor() as cursor:
                         cursor.execute(
-                            "SELECT COUNT(DISTINCT indicator_id) as scored_count FROM investment_scores WHERE investment_id = %s",
-                            (investment_id,)
+                            "SELECT COUNT(DISTINCT indicator_id) as scored_count FROM fund_scores WHERE fund_id = %s",
+                            (fund_id,)
                         )
                         result = cursor.fetchone()
                         scored_count = result['scored_count'] if result else 0
 
-                # 总共20个指标（13个拆分为20个）
-                if scored_count >= 20:
+                # 总共26个指标
+                if scored_count >= 26:
                     # 重新计算所有维度的汇总
                     for dim_code in ['POLICY', 'LAYOUT', 'EXECUTION']:
                         from app.utils.database import get_db_connection
@@ -524,23 +525,23 @@ class ScoringService:
                                 )
                                 dim_result = cursor.fetchone()
                                 if dim_result:
-                                    self.calculate_and_save_fund_dimension_score(investment_id, dim_result['id'])
+                                    self.calculate_and_save_fund_dimension_score(fund_id, dim_result['id'])
 
                     # 重新获取维度汇总
                     with get_db_connection() as conn:
                         with conn.cursor() as cursor:
                             sql = """
                                 SELECT iss.*, sd.dimension_code
-                                FROM investment_scoring_summary iss
+                                FROM fund_scoring_summary iss
                                 JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
-                                WHERE iss.investment_id = %s
+                                WHERE iss.fund_id = %s
                                 ORDER BY sd.display_order
                             """
-                            cursor.execute(sql, (investment_id,))
+                            cursor.execute(sql, (fund_id,))
                             summaries = cursor.fetchall()
 
                 if len(summaries) < 3:
-                    return {'success': False, 'message': f'评分不完整，已完成 {len(summaries)}/3 个维度，共 {scored_count}/20 个指标'}
+                    return {'success': False, 'message': f'评分不完整，已完成 {len(summaries)}/3 个维度，共 {scored_count}/26 个指标'}
 
             # 构建维度得分字典
             dimension_scores = {
@@ -552,8 +553,8 @@ class ScoringService:
             total_score, grade = self.calculator.calculate_total_score(dimension_scores)
 
             # 保存总分
-            total_id = self.scoring_repo.save_investment_total(
-                investment_id,
+            total_id = self.scoring_repo.save_fund_total(
+                fund_id,
                 total_score,
                 dimension_scores.get('POLICY', Decimal('0')),
                 dimension_scores.get('LAYOUT', Decimal('0')),
@@ -564,11 +565,12 @@ class ScoringService:
             # 更新排名
             self._update_fund_rankings()
 
-            # 更新投资状态
-            investment_repo = InvestmentRepository()
-            investment_repo.update_status(investment_id, 'completed')
+            # 更新基金状态
+            from core.repositories.fund_repository import FundRepository
+            fund_repo = FundRepository()
+            fund_repo.update_status(fund_id, 'completed')
 
-            logger.info(f"Calculated total score for investment {investment_id}: {total_score} ({grade})")
+            logger.info(f"Calculated total score for fund {fund_id}: {total_score} ({grade})")
 
             return {
                 'success': True,
@@ -588,14 +590,14 @@ class ScoringService:
         """更新所有投资排名"""
         try:
             # 获取所有已完成的 investment 总分
-            all_totals = self.scoring_repo.get_all_investment_totals()
+            all_totals = self.scoring_repo.get_all_fund_totals()
 
             # 计算排名
             ranked = self.calculator.calculate_project_ranking(all_totals)
 
-            # 更新数据库（将 project_id 改为 investment_id）
-            rankings = [{'rank': r['rank'], 'investment_id': r['project_id']} for r in ranked]
-            self.scoring_repo.update_investment_rankings(rankings)
+            # 更新数据库
+            rankings = [{'rank': r['rank'], 'fund_id': r['fund_id']} for r in ranked]
+            self.scoring_repo.update_fund_rankings(rankings)
 
             logger.info("Updated investment rankings")
         except Exception as e:
@@ -662,7 +664,7 @@ class ScoringService:
                 with conn.cursor() as cursor:
                     sql = """
                         SELECT grade, COUNT(*) as count
-                        FROM investment_total_scores
+                        FROM fund_total_scores
                         GROUP BY grade
                     """
                     cursor.execute(sql)
@@ -680,7 +682,7 @@ class ScoringService:
                 with conn.cursor() as cursor:
                     sql = """
                         SELECT sd.dimension_code, AVG(iss.weighted_total) as avg_score
-                        FROM investment_scoring_summary iss
+                        FROM fund_scoring_summary iss
                         JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
                         GROUP BY sd.dimension_code
                     """

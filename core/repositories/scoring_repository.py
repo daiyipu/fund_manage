@@ -413,22 +413,20 @@ class ScoringRepository:
             raise
 
     def get_all_fund_totals(self) -> List[Dict]:
-        """获取所有投资总分（用于排名）"""
+        """获取所有基金总分（用于排名）"""
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
                     sql = """
-                        SELECT its.*, i.investment_code, i.investment_name,
-                               i.industry, f.fund_name, f.fund_code
+                        SELECT its.*, f.fund_code, f.fund_name, f.region
                         FROM fund_total_scores its
-                        JOIN investments i ON its.fund_id = i.id
-                        JOIN funds f ON i.fund_id = f.id
+                        JOIN funds f ON its.fund_id = f.id
                         ORDER BY its.total_score DESC
                     """
                     cursor.execute(sql)
                     return cursor.fetchall()
         except Exception as e:
-            logger.error(f"Error getting all investment totals: {str(e)}")
+            logger.error(f"Error getting all fund totals: {str(e)}")
             raise
 
     def update_fund_rankings(self, rankings: List[Dict]):

@@ -2,6 +2,7 @@
 政府投资基金投向评分系统 - 主应用入口
 """
 import streamlit as st
+import streamlit.components.v1 as components
 import sys
 from pathlib import Path
 
@@ -29,14 +30,168 @@ project_service = ProjectService()  # 保留用于向后兼容
 user_service = UserService()
 
 
+# ============================================
+# 增强的会话管理
+# ============================================
+
+import hashlib
+import json
+import logging
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# 创建logger用于会话管理
+logger = logging.getLogger(__name__)
+
+# 使用文件系统持久化会话存储
+SESSION_STORE_FILE = Path(".streamlit/sessions.json")
+
+
+def _load_sessions() -> dict:
+    """从文件加载会话数据"""
+    try:
+        if SESSION_STORE_FILE.exists():
+            with open(SESSION_STORE_FILE, 'r') as f:
+                data = json.load(f)
+                # 转换过期时间字符串回datetime对象
+                for token, session in data.items():
+                    session['expires_at'] = datetime.fromisoformat(session['expires_at'])
+                return data
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading sessions: {e}")
+        return {}
+
+
+def _serialize_user_data(user_data: dict) -> dict:
+    """序列化用户数据，移除不可JSON化的对象"""
+    serialized = {}
+    for key, value in user_data.items():
+        if isinstance(value, datetime):
+            serialized[key] = value.isoformat()
+        elif isinstance(value, (str, int, float, bool, type(None))):
+            serialized[key] = value
+        # 跳过其他复杂对象
+    return serialized
+
+
+def _save_sessions(sessions: dict):
+    """保存会话数据到文件"""
+    try:
+        # 确保目录存在
+        SESSION_STORE_FILE.parent.mkdir(exist_ok=True)
+
+        # 转换datetime对象为字符串用于JSON序列化
+        serializable_sessions = {}
+        for token, session in sessions.items():
+            serializable_sessions[token] = {
+                'user': _serialize_user_data(session['user']),
+                'expires_at': session['expires_at'].isoformat()
+            }
+
+        with open(SESSION_STORE_FILE, 'w') as f:
+            json.dump(serializable_sessions, f)
+    except Exception as e:
+        logger.error(f"Error saving sessions: {e}")
+
+
+def generate_session_token(user_data: dict) -> str:
+    """生成会话令牌"""
+    # 使用用户ID和时间戳生成唯一令牌
+    user_id = str(user_data.get('id', ''))
+    timestamp = str(int(time.time()))
+    token_raw = f"{user_id}:{timestamp}:{app_config.secret_key}"
+    return hashlib.sha256(token_raw.encode()).hexdigest()[:32]
+
+
+def save_session_to_store(token: str, user_data: dict, expires_hours: int = 24):
+    """保存会话到文件存储"""
+    expires_at = datetime.now() + timedelta(hours=expires_hours)
+
+    # 加载现有会话
+    sessions = _load_sessions()
+
+    # 添加新会话
+    sessions[token] = {
+        'user': user_data,
+        'expires_at': expires_at
+    }
+
+    # 保存到文件
+    _save_sessions(sessions)
+
+
+def restore_session_from_store(token: str) -> dict | None:
+    """从文件存储恢复会话"""
+    sessions = _load_sessions()
+
+    if token not in sessions:
+        return None
+
+    session = sessions[token]
+    if datetime.now() > session['expires_at']:
+        # 会话已过期，删除并保存
+        del sessions[token]
+        _save_sessions(sessions)
+        return None
+
+    return session['user']
+
+
+def cleanup_expired_sessions():
+    """清理过期会话"""
+    sessions = _load_sessions()
+    now = datetime.now()
+    expired_tokens = [
+        token for token, session in sessions.items()
+        if now > session['expires_at']
+    ]
+
+    if expired_tokens:
+        for token in expired_tokens:
+            del sessions[token]
+        _save_sessions(sessions)
+
+
 def init_session_state():
     """初始化session state"""
+    # 初始化用户状态
     if 'user' not in st.session_state:
         st.session_state.user = None
     if 'current_page' not in st.session_state:
         st.session_state.current_page = 'dashboard'
     if 'page_selected' not in st.session_state:
         st.session_state.page_selected = '📈 仪表盘'
+    if 'remembered_username' not in st.session_state:
+        st.session_state.remembered_username = ''
+
+    # 初始化会话ID（用于跟踪会话）
+    if 'session_id' not in st.session_state:
+        import uuid
+        st.session_state.session_id = str(uuid.uuid4())
+
+    # 尝试从URL参数恢复会话（只恢复一次）
+    query_params = st.query_params
+    if 'session_token' in query_params and not st.session_state.get('user') and not st.session_state.get('session_restored'):
+        session_token = query_params['session_token']
+        restored_user = restore_session_from_store(session_token)
+        if restored_user:
+            st.session_state.user = restored_user
+            st.session_state.current_page = 'dashboard'
+            st.session_state.page_selected = '📈 仪表盘'
+            st.session_state.session_restored = True
+            # 清理URL参数（不触发rerun以避免死循环）
+            try:
+                del query_params['session_token']
+            except:
+                pass
+
+    # 调试：打印session state状态
+    if st.session_state.get('user'):
+        st.session_state._login_debug = f"已登录用户: {st.session_state.user['real_name']}"
+    else:
+        st.session_state._login_debug = "未登录"
 
 
 def show_login():
@@ -47,9 +202,24 @@ def show_login():
     st.title("📊 政府投资基金投向评分系统")
     st.subheader("用户登录")
 
+    # 办法说明
+    st.markdown("""
+    <div style="padding: 15px; background-color: #f0f8ff; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #4472C4;">
+        <p style="margin: 0; font-size: 14px; color: #333;">
+            📖 <b>评分依据</b>：本系统参照《政府投资基金投向评价管理办法（试行）》进行设计<br>
+            <a href="https://zfxxgk.ndrc.gov.cn/web/iteminfo.jsp?id=20590" target="_blank" style="color: #4472C4; text-decoration: none; font-weight: 500;">
+                🔗 查看《政府投资基金投向评价管理办法（试行）》全文
+            </a>
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
     with st.form("login_form"):
-        username = st.text_input("用户名", placeholder="请输入用户名", key="login_username")
+        # 从session_state中获取记住的用户名
+        remembered_username = st.session_state.get('remembered_username', '')
+        username = st.text_input("用户名", placeholder="请输入用户名", value=remembered_username, key="login_username")
         password = st.text_input("密码", type="password", placeholder="请输入密码", key="login_password")
+        remember_me = st.checkbox("记住用户名", value=False, key="remember_me")
         submitted = st.form_submit_button("登录", use_container_width=True, type="primary")
 
         if submitted:
@@ -62,6 +232,18 @@ def show_login():
                 st.session_state.user = user
                 st.session_state.current_page = 'dashboard'
                 st.session_state.page_selected = '📈 仪表盘'
+
+                # 生成并保存会话令牌
+                session_token = generate_session_token(user)
+                save_session_to_store(session_token, user)
+                st.session_state.session_token = session_token
+
+                # 如果选择记住用户名，则保存到session_state
+                if remember_me:
+                    st.session_state.remembered_username = username
+                else:
+                    st.session_state.remembered_username = ''
+
                 st.success(f"欢迎回来，{user['real_name']}！")
                 # 兼容旧版streamlit
                 try:
@@ -72,6 +254,25 @@ def show_login():
                 st.error("用户名或密码错误")
 
     st.info("💡 默认管理员账号：admin / admin123")
+
+    # 添加登录状态说明
+    st.caption("💡 登录后请保持浏览器标签页打开。如需刷新页面，请使用浏览器的刷新按钮而不是重新打开网址。")
+
+    # 显示会话状态（调试用）
+    if '_login_debug' in st.session_state:
+        st.caption(f"🔍 会话状态: {st.session_state._login_debug}")
+
+    # 显示正确的访问地址
+    st.markdown("""
+    <div style="padding: 10px; background-color: #e8f5e9; border-radius: 5px; margin-top: 20px;">
+        <p style="margin: 0; font-size: 14px; color: #2e7d32;">
+            🌐 <b>访问地址</b>：
+            <a href="http://localhost:8502" target="_blank" style="color: #1565c0; text-decoration: none; font-weight: 500;">http://localhost:8502</a>
+            或
+            <a href="http://192.168.1.104:8502" target="_blank" style="color: #1565c0; text-decoration: none; font-weight: 500;">http://192.168.1.104:8502</a>
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def show_sidebar():
@@ -175,21 +376,48 @@ def show_dashboard():
     """显示仪表盘"""
     st.title("📈 评分概览")
 
-    # 统计卡片
+    # 添加办法链接和访问地址
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+        <div style="padding: 10px; background-color: #f0f8ff; border-radius: 5px; margin-bottom: 20px;">
+            <p style="margin: 0; font-size: 13px; color: #555;">
+                📖 <b>评分依据</b>：<a href="https://zfxxgk.ndrc.gov.cn/web/iteminfo.jsp?id=20590" target="_blank" style="color: #4472C4;">《政府投资基金投向评价管理办法（试行）》</a>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown("""
+        <div style="padding: 10px; background-color: #e8f5e9; border-radius: 5px; margin-bottom: 20px;">
+            <p style="margin: 0; font-size: 13px; color: #2e7d32;">
+                🌐 <b>访问地址</b>：<br/>
+                <a href="http://localhost:8502" target="_blank" style="color: #1565c0; text-decoration: none; font-weight: 500;">http://localhost:8502</a><br/>
+                <a href="http://192.168.1.104:8502" target="_blank" style="color: #1565c0; text-decoration: none; font-weight: 500;">http://192.168.1.104:8502</a>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 统计卡片（使用基金数据）
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        total_projects = project_service.count_projects()
-        st.metric("总项目数", total_projects)
+        total_funds = fund_service.count_funds()
+        st.metric("总基金数", total_funds)
 
     with col2:
-        scored_projects = project_service.count_scored_projects()
-        st.metric("已评分项目", scored_projects)
+        # 统计已评分的基金数量（已计算总分的）
+        from app.utils.database import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) as count FROM fund_total_scores")
+                result = cursor.fetchone()
+                scored_funds = result['count'] if result else 0
+        st.metric("已评分基金", scored_funds)
 
     with col3:
-        grade_dist = scoring_service.get_grade_distribution()
+        grade_dist = scoring_service.get_fund_grade_distribution()
         excellent_count = grade_dist.get('excellent', 0)
-        st.metric("优秀项目数", excellent_count)
+        st.metric("优秀基金数", excellent_count)
 
     with col4:
         total = sum(grade_dist.values())
@@ -217,32 +445,55 @@ def show_dashboard():
 
     with col2:
         st.subheader("维度平均分")
-        dimension_avg = scoring_service.get_dimension_averages()
+        dimension_avg = scoring_service.get_fund_dimension_averages()
         if dimension_avg:
             import pandas as pd
             df = pd.DataFrame([
                 {'维度': '政策符合性', '平均分': dimension_avg.get('POLICY', 0)},
-                {'维度': '生产力布局', '平均分': dimension_avg.get('LAYOUT', 0)},
-                {'维度': '执行能力', '平均分': dimension_avg.get('EXECUTION', 0)}
+                {'维度': '优化生产力布局', '平均分': dimension_avg.get('LAYOUT', 0)},
+                {'维度': '政策执行能力', '平均分': dimension_avg.get('EXECUTION', 0)}
             ])
             st.bar_chart(df.set_index('维度'))
         else:
             st.info("暂无评分数据")
 
-    # 最近评分项目
-    st.subheader("评分项目状态")
-    projects = project_service.list_projects(limit=10)
-    if projects:
+    # 最近基金
+    st.subheader("基金评分状态")
+    # 获取所有基金及其评分状态
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT f.fund_code, f.fund_name, f.status,
+                       COALESCE(ft.total_score, 0) as total_score,
+                       ft.grade,
+                       f.created_at
+                FROM funds f
+                LEFT JOIN fund_total_scores ft ON f.id = ft.fund_id
+                WHERE f.status IN ('active', 'completed')
+                ORDER BY f.created_at DESC
+                LIMIT 10
+            """)
+            funds = cursor.fetchall()
+
+    if funds:
         import pandas as pd
-        df = pd.DataFrame(projects)
+        df = pd.DataFrame(funds)
         df['创建时间'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d')
+        df['状态'] = df['status'].map({'active': '活跃', 'completed': '已完成'})
+        df['总分'] = df['total_score'].apply(lambda x: f"{x:.2f}" if x > 0 else '-')
+        df['等级'] = df['grade'].map({
+            'excellent': '优秀',
+            'good': '良好',
+            'qualified': '合格',
+            'unqualified': '不合格'
+        }).fillna('-')
         st.dataframe(
-            df[['project_code', 'project_name', 'status', '创建时间']],
+            df[['fund_code', 'fund_name', '总分', '等级', '状态', '创建时间']],
             use_container_width=True,
             hide_index=True
         )
     else:
-        st.info("暂无项目数据")
+        st.info("暂无基金数据")
 
 
 def show_fund_management():
@@ -303,7 +554,7 @@ def show_fund_management():
     # 筛选条件
     col1, col2, col3 = st.columns(3)
     with col1:
-        status_filter = st.selectbox("状态", ["全部", "draft", "active", "completed", "archived"], index=1, key="fm_status")
+        status_filter = st.selectbox("状态", ["全部", "draft", "active", "completed", "archived"], index=0, key="fm_status")
     with col2:
         region_filter = st.text_input("地区", key="fm_region")
     with col3:
@@ -355,7 +606,7 @@ def show_investment_management():
     st.divider()
 
     # 创建投资按钮
-    with st.expander("➕ 创建新投资", expanded=False):
+    with st.expander("➕ 创建新投资项目", expanded=False):
         with st.form("create_investment_form"):
             col1, col2 = st.columns(2)
             with col1:
@@ -656,25 +907,119 @@ def show_scoring():
             options.sort(key=lambda x: x['score'], reverse=True)
             scoring_options[indicator['code']] = options
 
-    # 创建评分表单
-    with st.form("scoring_form"):
-        user = st.session_state.user
+    # 创建回调函数用于自动保存单个评分
+    def save_single_score(fund_id, indicator_code, dim_code, user_id):
+        """保存单个评分的回调函数（接收参数）"""
+        # 添加调试日志
+        import logging
+        logger = logging.getLogger(__name__)
 
-        for dim_code, dimension in SCORING_DIMENSIONS.items():
-            st.markdown(f"### {dimension['name']}（权重 {dimension['weight']}%，满分 {dimension['max_score']} 分）")
+        logger.info(f"save_single_score 被调用: fund_id={fund_id}, indicator_code={indicator_code}")
 
-            # 指标评分
+        # 从selectbox的key直接获取当前选中的索引
+        selectbox_key = f"score_{fund_id}_{indicator_code}"
+        if selectbox_key in st.session_state:
+            selected_index = st.session_state[selectbox_key]
+
+            # 获取该指标对应的所有选项
+            indicator_key = f"_options_{fund_id}_{indicator_code}"
+            if indicator_key in st.session_state:
+                options = st.session_state[indicator_key]
+                score_value = options[selected_index]['score']
+
+                # 获取dimension_id和indicator_id
+                from app.utils.database import get_db_connection
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT id FROM scoring_dimensions WHERE dimension_code = %s",
+                            (dim_code,)
+                        )
+                        dim_result = cursor.fetchone()
+                        if dim_result:
+                            dimension_id = dim_result['id']
+
+                            cursor.execute(
+                                "SELECT id FROM scoring_indicators WHERE indicator_code = %s",
+                                (indicator_code,)
+                            )
+                            ind_result = cursor.fetchone()
+                            if ind_result:
+                                indicator_id = ind_result['id']
+
+                                # 保存评分
+                                from decimal import Decimal
+                                logger.info(f"准备保存评分: fund_id={fund_id}, indicator_code={indicator_code}, score={score_value}")
+                                result = scoring_service.submit_fund_indicator_score(
+                                    fund_id=fund_id,
+                                    dimension_id=dimension_id,
+                                    indicator_id=indicator_id,
+                                    raw_score=Decimal(str(score_value)),
+                                    scorer_id=user_id,
+                                    scorer_comment=None
+                                )
+
+                                logger.info(f"保存结果: {result}")
+                                if result['success']:
+                                    st.session_state[f"_last_saved_{indicator_code}"] = f"✓ 已保存：{score_value}分"
+                                    st.session_state[f"score_value_{fund_id}_{indicator_code}"] = score_value
+                                else:
+                                    logger.error(f"保存失败: {result.get('message')}")
+                                    st.session_state[f"_last_saved_{indicator_code}"] = f"❌ 保存失败: {result.get('message')}"
+                            else:
+                                logger.error(f"未找到indicator: indicator_code={indicator_code}")
+                        else:
+                            logger.error(f"未找到dimension: dim_code={dim_code}")
+            else:
+                logger.error(f"未找到options: {indicator_key}")
+        else:
+            logger.error(f"未找到selectbox值: {selectbox_key}")
+
+    # 创建评分表单（移除form wrapper，使用callbacks自动保存）
+    user = st.session_state.user
+
+    # 检查当前已评分数量
+    from app.utils.database import get_db_connection
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(DISTINCT indicator_id) as scored_count FROM fund_scores WHERE fund_id = %s",
+                (fund_id,)
+            )
+            scored_count_result = cursor.fetchone()
+            current_scored_count = scored_count_result['scored_count'] if scored_count_result else 0
+
+    # 添加提示信息
+    st.info(f"💡 **自动保存已启用**：每次选择评分选项后会自动保存到数据库。当前已完成 {current_scored_count}/26 个指标的评分。全部评分完成后，请点击底部的「计算总分」按钮。")
+
+    # 维度计数器
+    dim_idx = 0
+    for dim_code, dimension in SCORING_DIMENSIONS.items():
+            dim_idx += 1
+            st.markdown(f"""
+                <div style="font-size: 20px; font-weight: 600; color: #1f77b4; margin-bottom: 15px; padding-bottom: 8px; border-bottom: 2px solid #e0e0e0;">
+                    {dim_idx}. {dimension['name']}（权重 {dimension['weight']}%，满分 {dimension['max_score']} 分）
+                </div>
+            """, unsafe_allow_html=True)
+
+            # 指标计数器
+            ind_idx = 0
             for indicator in dimension['indicators']:
+                ind_idx += 1
                 # 处理父指标（包含子指标）
                 if indicator.get('type') == 'parent':
                     # 显示父指标标题栏
-                    st.markdown(f"#### 📊 {indicator['name']}")
+                    st.markdown(f"""
+                        <div style="font-size: 18px; font-weight: 500; color: #333; margin-top: 10px; margin-bottom: 5px;">
+                            📊 {dim_idx}.{ind_idx} {indicator['name']}
+                        </div>
+                    """, unsafe_allow_html=True)
 
                     # 计算子指标汇总得分
                     sub_indicators = indicator.get('sub_indicators', [])
                     total_sub_score = 0.0
                     for sub in sub_indicators:
-                        score_key = f"score_value_{project_id}_{sub['code']}"
+                        score_key = f"score_value_{fund_id}_{sub['code']}"
                         if score_key in st.session_state:
                             total_sub_score += st.session_state[score_key]
 
@@ -683,15 +1028,21 @@ def show_scoring():
                     with col1:
                         st.caption(f"满分: {indicator['max_score']} 分")
                     with col2:
-                        st.metric("汇总得分", f"{total_sub_score:.1f}")
+                        # 使用自定义HTML替代metric，使字体更小
+                        st.markdown(f"""
+                            <div style="font-size: 14px; line-height: 1.2; padding: 5px 0;">
+                                <span style="color: #666; font-size: 12px;">小计得分：</span>
+                                <span style="color: #1f77b4; font-weight: 600; font-size: 14px;">{total_sub_score:.1f}</span>
+                            </div>
+                        """, unsafe_allow_html=True)
                     with col3:
-                        completion = len([s for s in sub_indicators if f"score_value_{project_id}_{s['code']}" in st.session_state])
+                        completion = len([s for s in sub_indicators if f"score_value_{fund_id}_{s['code']}" in st.session_state])
                         st.caption(f"完成度: {completion}/{len(sub_indicators)}")
 
-                    st.markdown("---")
-
                     # 显示子指标
+                    sub_idx = 0
                     for sub in sub_indicators:
+                        sub_idx += 1
                         options = scoring_options.get(sub['code'], [])
 
                         # 获取当前选择的索引
@@ -703,33 +1054,58 @@ def show_scoring():
                                         current_score = ind['score']
                                         break
 
-                        # 找到当前分数对应的索引
+                        # 找到当前分数对应的索引（精确匹配）
                         default_index = 0
+                        score_found = False
                         for i, opt in enumerate(options):
                             if opt['score'] == current_score:
                                 default_index = i
+                                score_found = True
                                 break
 
-                        # 子指标使用缩进显示
-                        with st.expander(f"└─ **{sub['name']}**（满分 {sub['max_score']} 分）", expanded=False):
-                            if options:
-                                st.write("**请选择评分等级：**")
+                        # 如果没有找到匹配的分数，使用第一个选项
+                        if not score_found and options:
+                            default_index = 0
+                        # 如果当前分数为0（未评分），查找第一个选项
+                        elif current_score == 0 and options:
+                            default_index = 0
 
-                                # 使用selectbox让用户选择评分等级
-                                selected_option = st.selectbox(
-                                    f"选择评分_{sub['code']}",
-                                    options=options,
-                                    format_func=lambda x: x['label'],
-                                    index=default_index,
-                                    key=f"score_{project_id}_{sub['code']}"
-                                )
-                                # 将选择的分数存储到session_state
-                                st.session_state[f"score_value_{project_id}_{sub['code']}"] = selected_option['score']
+                        # 子指标标题栏（缩进显示）
+                        st.markdown(f"""
+                            <div style="font-size: 16px; font-weight: 400; color: #555; margin-left: 40px; margin-top: 5px; margin-bottom: 8px;">
+                                └─ {dim_idx}.{ind_idx}.{sub_idx} {sub['name']}（满分 {sub['max_score']} 分）
+                            </div>
+                        """, unsafe_allow_html=True)
 
-                                # 显示当前选择的分数
-                                st.info(f"当前选择：{selected_option['label']}")
-                            else:
-                                st.warning("无评分选项")
+                        # 将选项存储到session_state，供回调函数使用
+                        st.session_state[f"_options_{fund_id}_{sub['code']}"] = options
+
+                        # 创建选项标签列表（用于显示）
+                        option_labels = [opt['label'] for opt in options]
+
+                        # 使用columns实现缩进（与标题40px缩进保持一致）
+                        col_space, col_content = st.columns([0.08, 0.92])
+                        with col_content:
+                            # 使用selectbox让用户选择评分等级（带自动保存）
+                            selected_index = st.selectbox(
+                                f"_{sub['code']}",  # 使用下划线前缀使标签最小化
+                                options=range(len(options)),
+                                format_func=lambda i: option_labels[i],
+                                index=default_index,
+                                key=f"score_{fund_id}_{sub['code']}",
+                                on_change=save_single_score,
+                                args=(fund_id, sub['code'], dim_code, user['id']),
+                                label_visibility="collapsed"  # 隐藏标签
+                            )
+
+                        # 将选择的分数存储到session_state
+                        selected_option = options[selected_index]
+                        st.session_state[f"score_value_{fund_id}_{sub['code']}"] = selected_option['score']
+
+                        # 显示保存状态
+                        saved_key = f"_last_saved_{sub['code']}"
+                        if saved_key in st.session_state:
+                            st.caption(st.session_state[saved_key])
 
                     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -746,43 +1122,78 @@ def show_scoring():
                                     current_score = ind['score']
                                     break
 
-                    # 找到当前分数对应的索引
+                    # 找到当前分数对应的索引（精确匹配）
                     default_index = 0
+                    score_found = False
                     for i, opt in enumerate(options):
                         if opt['score'] == current_score:
                             default_index = i
+                            score_found = True
                             break
 
-                    # 使用expander让每个指标更清晰
-                    with st.expander(f"**{indicator['name']}**（满分 {indicator['max_score']} 分）", expanded=False):
-                        if options:
-                            st.write("**请选择评分等级：**")
+                    # 如果没有找到匹配的分数，使用第一个选项
+                    if not score_found and options:
+                        default_index = 0
+                    # 如果当前分数为0（未评分），查找第一个选项
+                    elif current_score == 0 and options:
+                        default_index = 0
 
-                            # 使用selectbox让用户选择评分等级
-                            selected_option = st.selectbox(
-                                f"选择评分_{indicator['code']}",
-                                options=options,
-                                format_func=lambda x: x['label'],
-                                index=default_index,
-                                key=f"score_{project_id}_{indicator['code']}"
-                            )
-                            # 将选择的分数存储到session_state
-                            st.session_state[f"score_value_{project_id}_{indicator['code']}"] = selected_option['score']
+                    # 叶子指标标题栏（与父指标样式一致）
+                    st.markdown(f"""
+                        <div style="font-size: 18px; font-weight: 500; color: #333; margin-top: 15px; margin-bottom: 10px;">
+                            {dim_idx}.{ind_idx} {indicator['name']}（满分 {indicator['max_score']} 分）
+                        </div>
+                    """, unsafe_allow_html=True)
 
-                            # 显示当前选择的分数
-                            st.info(f"当前选择：{selected_option['label']}")
-                        else:
-                            st.warning("无评分选项")
+                    # 将选项存储到session_state，供回调函数使用
+                    st.session_state[f"_options_{fund_id}_{indicator['code']}"] = options
+
+                    # 创建选项标签列表（用于显示）
+                    option_labels = [opt['label'] for opt in options]
+
+                    # 使用selectbox让用户选择评分等级（带自动保存）
+                    selected_index = st.selectbox(
+                        f"_{indicator['code']}",  # 使用下划线前缀使标签最小化
+                        options=range(len(options)),
+                        format_func=lambda i: option_labels[i],
+                        index=default_index,
+                        key=f"score_{fund_id}_{indicator['code']}",
+                        on_change=save_single_score,
+                        args=(fund_id, indicator['code'], dim_code, user['id']),
+                        label_visibility="collapsed"  # 隐藏标签
+                    )
+
+                    # 将选择的分数存储到session_state
+                    selected_option = options[selected_index]
+                    st.session_state[f"score_value_{fund_id}_{indicator['code']}"] = selected_option['score']
+
+                    # 显示保存状态
+                    saved_key = f"_last_saved_{indicator['code']}"
+                    if saved_key in st.session_state:
+                        st.caption(st.session_state[saved_key])
 
             st.divider()
 
-        # 提交按钮
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            submitted = st.form_submit_button("💾 保存评分", use_container_width=True)
+    # 计算总分按钮（替代原来的保存评分按钮）
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("🧮 计算总分", use_container_width=True, type="primary"):
+            with st.spinner("正在计算总分..."):
+                result = scoring_service.calculate_fund_total_score(fund_id)
+                if result['success']:
+                    st.success(f"""
+                        ✅ **计算完成！**
 
-        if submitted:
-            save_scores_with_options(fund_id, structure, user['id'])
+                        - **总分**：{result['data']['total_score']:.2f} 分
+                        - **等级**：{result['data']['grade_name']}
+                        - **政策符合性**：{result.get('data', {}).get('policy_score', 0):.2f} 分
+                        - **优化生产力布局**：{result.get('data', {}).get('layout_score', 0):.2f} 分
+                        - **政策执行能力**：{result.get('data', {}).get('execution_score', 0):.2f} 分
+                    """)
+                    st.balloons()
+                else:
+                    st.error(f"❌ {result['message']}")
 
 
 def save_scores_with_options(fund_id: int, structure: dict, scorer_id: int):
@@ -847,7 +1258,7 @@ def save_scores_with_options(fund_id: int, structure: dict, scorer_id: int):
                         if ind_result:
                             indicator_id = ind_result['id']
 
-                            result = scoring_service.submit_investment_indicator_score(
+                            result = scoring_service.submit_fund_indicator_score(
                                 fund_id=fund_id,
                                 dimension_id=dimension_id,
                                 indicator_id=indicator_id,
@@ -893,7 +1304,7 @@ def save_scores_with_options(fund_id: int, structure: dict, scorer_id: int):
                                 if ind_result:
                                     indicator_id = ind_result['id']
 
-                                    result = scoring_service.submit_investment_indicator_score(
+                                    result = scoring_service.submit_fund_indicator_score(
                                         fund_id=fund_id,
                                         dimension_id=dimension_id,
                                         indicator_id=indicator_id,
@@ -915,12 +1326,12 @@ def save_scores_with_options(fund_id: int, structure: dict, scorer_id: int):
                             )
                             dim_result = cursor.fetchone()
                             if dim_result:
-                                scoring_service.calculate_and_save_investment_dimension_score(
+                                scoring_service.calculate_and_save_fund_dimension_score(
                                     fund_id, dim_result['id']
                                 )
 
                 # 计算总分
-                total_result = scoring_service.calculate_investment_total_score(fund_id)
+                total_result = scoring_service.calculate_fund_total_score(fund_id)
 
                 if total_result['success']:
                     st.success(f"✅ 评分保存成功！总分: {total_result['data']['total_score']:.2f}，等级: {total_result['data']['grade_name']}")
@@ -945,23 +1356,54 @@ def show_results():
     """显示结果展示页面"""
     st.title("📊 结果展示")
 
-    # 获取已评分的基金
-    funds = fund_service.list_funds(status='active')
+    # 获取已评分的基金（包括 active 和 completed 状态）
+    active_funds = fund_service.list_funds(status='active') or []
+    completed_funds = fund_service.list_funds(status='completed') or []
+    funds = active_funds + completed_funds
 
-    # 筛选出有评分的基金
+    # 筛选出有评分的基金（已计算总分的或者已评满26个指标的）
     funds_with_scores = []
     for fund in funds:
-        # 检查是否有评分记录
+        # 检查是否有总分记录（已计算总分的）
         from app.utils.database import get_db_connection
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+                # 首先检查是否有总分记录
                 cursor.execute("SELECT COUNT(*) as count FROM fund_total_scores WHERE fund_id = %s", (fund['id'],))
                 result = cursor.fetchone()
                 if result and result['count'] > 0:
                     funds_with_scores.append(fund)
+                    continue
+
+                # 如果没有总分记录，检查是否已完成26个指标的评分
+                cursor.execute(
+                    "SELECT COUNT(DISTINCT indicator_id) as scored_count FROM fund_scores WHERE fund_id = %s",
+                    (fund['id'],)
+                )
+                score_result = cursor.fetchone()
+                if score_result and score_result['scored_count'] >= 26:
+                    funds_with_scores.append(fund)
 
     if not funds_with_scores:
-        st.info("暂无已完成评分的基金")
+        st.info("暂无已完成评分的基金（需要完成所有26个指标评分并计算总分）")
+        # 检查是否有部分完成的评分
+        from app.utils.database import get_db_connection
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT f.fund_code, f.fund_name, COUNT(DISTINCT fs.indicator_id) as scored_count
+                    FROM funds f
+                    LEFT JOIN fund_scores fs ON f.id = fs.fund_id
+                    WHERE f.status = 'active'
+                    GROUP BY f.id
+                    HAVING scored_count > 0
+                    ORDER BY scored_count DESC
+                """)
+                partial_scores = cursor.fetchall()
+                if partial_scores:
+                    st.write("**部分完成评分的基金：**")
+                    for row in partial_scores:
+                        st.caption(f"• {row['fund_code']} - {row['fund_name']}: {row['scored_count']}/26 个指标")
         return
 
     # 基金选择
@@ -981,6 +1423,11 @@ def show_results():
         return
 
     data = detail['data']
+
+    # 如果没有计算总分，显示提示
+    if data.get('total_score') is None:
+        st.warning("⚠️ 该基金已完成所有指标评分，但尚未计算总分。请前往「📝 评分录入」页面点击「🧮 计算总分」按钮。")
+        st.divider()
 
     # 显示总分和等级
     col1, col2, col3, col4 = st.columns(4)
@@ -1028,12 +1475,33 @@ def show_results():
     st.divider()
 
     # 显示各维度评分
+    # 获取维度汇总数据（使用数据库中计算好的值）
+    from app.utils.database import get_db_connection
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            sql = """
+                SELECT iss.*, sd.dimension_code
+                FROM fund_scoring_summary iss
+                JOIN scoring_dimensions sd ON iss.dimension_id = sd.id
+                WHERE iss.fund_id = %s
+                ORDER BY sd.display_order
+            """
+            cursor.execute(sql, (fund_id,))
+            dimension_summaries = {row['dimension_code']: row for row in cursor.fetchall()}
+
     for dim_code, dim_data in data['dimensions'].items():
         st.subheader(f"### {dim_data['name']}")
 
-        # 维度总分
-        dim_total = sum(ind['score'] for ind in dim_data['indicators'])
-        dim_weighted = sum(ind['weighted_score'] for ind in dim_data['indicators'])
+        # 使用数据库中的维度汇总数据
+        if dim_code in dimension_summaries:
+            dim_summary = dimension_summaries[dim_code]
+            dim_total = float(dim_summary['total_score'])
+            dim_weighted = float(dim_summary['weighted_total'])
+        else:
+            # 回退方案：计算得分（仅当数据库中没有汇总数据时）
+            dim_total = sum(ind['score'] for ind in dim_data['indicators'])
+            dim_weighted = sum(ind['weighted_score'] for ind in dim_data['indicators'])
+
         st.info(f"维度得分: {dim_total:.2f} / 加权得分: {dim_weighted:.2f}")
 
         # 指标列表
